@@ -1,0 +1,5 @@
+# setup common environment variables
+
+# This will be overriden if in a Windows Sub-system for Linux (WSL)
+# environment.
+export MY_HOME=${HOME}

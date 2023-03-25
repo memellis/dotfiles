@@ -1,0 +1,4 @@
+# setup environment knowing this is a Windows Sub-system for Linux
+# environment
+
+export MY_HOME=${USERPROFILE}

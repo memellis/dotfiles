@@ -1,0 +1,5 @@
+# setup rust environment
+
+if [ -f ${MY_HOME}/.cargo/env ]; then
+  ${MY_HOME}/.cargo/env
+fi

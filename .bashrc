@@ -116,31 +116,29 @@ if ! shopt -oq posix; then
   fi
 fi
 
-env=~/.ssh/agent.env
-
-agent_load_env () { test -f "$env" && . "$env" >| /dev/null ; }
-
-agent_start () {
-    (umask 077; ssh-agent >| "$env")
-    . "$env" >| /dev/null ; }
-
-agent_load_env
-
-# agent_run_state: 0=agent running w/ key; 1=agent w/o key; 2= agent not running
-agent_run_state=$(ssh-add -l >| /dev/null 2>&1; echo $?)
-
-if [ ! "$SSH_AUTH_SOCK" ] || [ $agent_run_state = 2 ]; then
-    agent_start
-    ssh-add
-elif [ "$SSH_AUTH_SOCK" ] && [ $agent_run_state = 1 ]; then
-    ssh-add
+# setup ssh-agent
+if [ -f ~/.bashrc_ssh_agent ]; then
+  . ~/.bashrc_ssh_agent
 fi
 
-unset env
-
+# if in Windows Sub-system for Linux (WSL) then include setup 
+# of the WSL environment.
 
 if grep -qi microsoft /proc/version; then
   echo "Ubuntu on Windows"
+  if [[ -n "$IS_WSL" || -n "$WSL_DISTRO_NAME" ]]; then
+    echo "This is Windows Sub-system for Linux (WSL)."
+    if [ -f ~/.bashrc_wsl ]; then
+      . ~/.bashrc_wsl
+    fi
+  else
+    echo "This is not Windows Sub-system for Linux (WSL)."
+  fi
 else
-  echo "native Linux"
+  echo "Native Linux"
 fi
+
+if [ -f ~/.bashrc_utilities ]; then
+  . ~/.bashrc_utilities
+fi
+

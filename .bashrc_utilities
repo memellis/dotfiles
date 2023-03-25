@@ -1,0 +1,9 @@
+# Set up environment for installed utilities
+
+if [ -f ${MY_HOME}/.bashrc_go ]; then
+  . ${MY_HOME}/.bashrc_go
+fi
+
+if [ -f ${MY_HOME}/.bashrc_rust ]; then
+  . ${MY_HOME}/.bashrc_rust
+fi
