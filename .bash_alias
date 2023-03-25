@@ -1,0 +1,5 @@
+alias ls='ls -F'
+alias ll='ls -lh'
+
+
+alias mywindev='cd /mnt/c/Users/mark/MyDevelop'
