@@ -1,5 +1,7 @@
 # called by .bashrc for setting up ssh-agent for ssh-keys
 
+echo "Setting up ssh-agent..."
+
 env=~/.ssh/agent.env
 
 agent_load_env () { test -f "$env" && . "$env" >| /dev/null ; }
