@@ -30,3 +30,7 @@ fi
 if [ -f ~/.bash_aliases ]; then
     . ~/.bash_aliases
 fi
+
+if [ -f ~/.bashrc_git_env ]; then
+    . ~/.bashrc_git_env
+fi

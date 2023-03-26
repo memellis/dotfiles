@@ -1,0 +1,7 @@
+# Set some preferred git settings 
+
+git config --global user.name "Mark Ellis"
+
+git config --global user.email "memellis@gmail.com"
+
+git config --global core.autocrlf false
