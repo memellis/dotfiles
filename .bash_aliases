@@ -1,3 +1,3 @@
 echo "Setting my bash_aliases..."
 
-alias mywindev="${MY_HOME}/MyDevelop"
+alias mywindev="cd ${MY_HOME}/MyDevelop"
