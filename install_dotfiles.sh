@@ -19,10 +19,12 @@ install_dotfile() {
         then
             cp ${dotfile} ~/${dotfile} 
         fi
+    else 
+        cp ${dotfile} ~/${dotfile}
     fi
 }
 
-dotfiles=".bash_alias "
+dotfiles+=".bash_aliases "
 dotfiles+=".bash_logout "
 dotfiles+=".bashrc "
 dotfiles+=".bashrc_envvars "
@@ -35,6 +37,6 @@ dotfiles+=".bashrc_wsl_env "
 
 for dotfile in ${dotfiles}
 do
-    echo "Installing ${dotfile} to ~/.${dotfile}..."
+    echo "Installing ${dotfile} to ~/${dotfile}..."
     install_dotfile ${dotfile}
 done
