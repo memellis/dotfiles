@@ -27,6 +27,7 @@ install_dotfile() {
 dotfiles+=".bash_aliases "
 dotfiles+=".bash_logout "
 dotfiles+=".bashrc "
+dotfiles+=".bashrc_env "
 dotfiles+=".bashrc_envvars "
 dotfiles+=".bashrc_go "
 dotfiles+=".bashrc_rust "
