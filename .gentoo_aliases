@@ -1,0 +1,3 @@
+emerge-update() {
+  sudo -s time emerge --update --newuse --changed-use --deep --with-bdeps=y @world -av --backtrack=1000 --jobs=1 --changed-deps
+}

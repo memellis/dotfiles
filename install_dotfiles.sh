@@ -37,6 +37,7 @@ dotfiles+=".bashrc_utilities "
 dotfiles+=".bashrc_wsl "
 dotfiles+=".bashrc_wsl_env "
 dotfiles+=".git_aliases "
+dotfiles+=".gentoo_aliases "
 
 for dotfile in ${dotfiles}
 do

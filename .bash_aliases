@@ -6,3 +6,7 @@ alias ubupdate="sudo apt-get update && sudo apt-get upgrade"
 if [ -f ~/.git_aliases ] ; then
     . ~/.git_aliases
 fi
+
+if [ -f ~/.gentoo_aliases ] ; then
+    . ~/.gentoo_aliases
+fi
