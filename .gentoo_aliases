@@ -10,3 +10,6 @@ revdep() {
 emerge-depclean() {
   sudo -s time emerge --depclean
 }
+emerge-resume() {
+    sudo emerge --resume
+}
