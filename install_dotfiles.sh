@@ -24,6 +24,12 @@ install_dotfile() {
     fi
 }
 
+install_ble() {
+    git clone --recursive --depth 1 --shallow-submodules https://github.com/akinomyoga/ble.sh.git
+    make -C ble.sh install PREFIX=~/.local
+    echo 'source ~/.local/share/blesh/ble.sh' >> ~/.bashrc
+}
+
 dotfiles+=".bash_aliases "
 dotfiles+=".bash_logout "
 dotfiles+=".bashrc "
@@ -44,3 +50,5 @@ do
     echo "Installing ${dotfile} to ~/${dotfile}..."
     install_dotfile ${dotfile}
 done
+
+install_ble
