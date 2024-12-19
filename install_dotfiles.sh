@@ -30,6 +30,10 @@ install_ble() {
     echo 'source ~/.local/share/blesh/ble.sh' >> ~/.bashrc
 }
 
+install_nix() {
+    sh <(curl -L https://nixos.org/nix/install) --no-daemon
+}
+
 dotfiles+=".bash_aliases "
 dotfiles+=".bash_logout "
 dotfiles+=".bashrc "
@@ -52,3 +56,5 @@ do
 done
 
 install_ble
+
+install_nix
