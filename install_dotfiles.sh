@@ -24,10 +24,26 @@ install_dotfile() {
     fi
 }
 
+install_powerline_fonts() {
+    git clone --depth 1 https://github.com/powerline/fonts pl-fonts && cd pl-fonts
+    ./install.sh
+    cd ..
+    rm -fr pl-fonts
+}
+
+install_power_line() {
+    pip install powerline-status
+}
+
+install_oh_my_bash() {
+    bash -c "$(curl -fsSL https://raw.githubusercontent.com/ohmybash/oh-my-bash/master/tools/install.sh)"
+}
+
 install_ble() {
     git clone --recursive --depth 1 --shallow-submodules https://github.com/akinomyoga/ble.sh.git
     make -C ble.sh install PREFIX=~/.local
     echo 'source ~/.local/share/blesh/ble.sh' >> ~/.bashrc
+    rm -fr ble.sh
 }
 
 install_nix() {
@@ -54,6 +70,12 @@ do
     echo "Installing ${dotfile} to ~/${dotfile}..."
     install_dotfile ${dotfile}
 done
+
+install_powerline_fonts
+
+install_power_line
+
+install_oh_my_bash
 
 install_ble
 
