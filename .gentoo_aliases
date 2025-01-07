@@ -1,8 +1,11 @@
+emaint-sync() {
+  sudo -s time emaint sync
+}
 emerge-update() {
   sudo -s time emerge --update --newuse --changed-use --deep --with-bdeps=y @world -av --backtrack=1000 --jobs=1 --changed-deps
 }
-emaint-sync() {
-  sudo -s time emaint sync
+emerge-newuse-world() {
+    sudo emerge --update --newuse --deep @world
 }
 revdep() {
   sudo -s time revdep-rebuild
