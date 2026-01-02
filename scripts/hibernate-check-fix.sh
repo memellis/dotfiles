@@ -1,165 +1,157 @@
 #!/bin/bash
-# hibernate-check-repair.sh
-# Version 4.9 - Final Production (Single-Offset Logic)
-# Diagnostic + Auto-repair + Size Optimizer + Robust Test Mode
+# hibernate-check-fix.sh
+# Version 6.7 - Module Reload & Hub Purge Edition
+# Optimized for Dell Wireless Dongle & usb_hub_wq errors
 
 show_help() {
-    echo "Usage: sudo ./hibernate-check-repair.sh [OPTIONS]"
+    echo "Usage: sudo ./hibernate-check-fix.sh [OPTIONS]"
     echo ""
     echo "Options:"
-    echo "  -h, --help      Show this help message and exit"
-    echo "  -d, --dry-run   Show changes without applying them"
-    echo "  -s, --resize    Optimize /swap.img (RAM + 4GB) and sync configs"
-    echo "  -t, --test      Run safe hibernation test (requires reboot after resize)"
+    echo "  -h, --help           Show this help message"
+    echo "  -s, --resize         Optimize swap (28GB) and sync kernel configs"
+    echo "  -t, --test           Run hibernation test (Forces Hub & Driver Reset)"
+    echo "  -i, --install-button Install 'Hibernate' icon to your App Menu"
+    echo "  -u, --undo-usb       RESTORE USB wake support (Fixes Dell Keyboard)"
     echo ""
 }
 
-DRYRUN=false; RUN_TEST=false; RESIZE_SWAP=false
-
-# Parse arguments
-case "$1" in
-    -h|--help) show_help; exit 0 ;;
-    -d|--dry-run) DRYRUN=true; echo "=== DRY-RUN MODE ===" ;;
-    -s|--resize) RESIZE_SWAP=true ;;
-    -t|--test) RUN_TEST=true ;;
-    "") ;;
-    *) echo "Error: Unknown option '$1'"; show_help; exit 1 ;;
-esac
-
+# Ensure root privileges
 if [[ $EUID -ne 0 ]]; then
-   echo "This script must be run as root (use sudo)."
+   echo "Error: This script must be run with sudo."
    exit 1
 fi
 
 # --- Helper: Gather current system specs ---
 get_specs() {
     if [ -f /swap.img ]; then
-        # Reliable UUID detection
         SWAP_UUID=$(blkid -s UUID -o value /swap.img)
-        
-        # PRECISE OFFSET LOGIC:
-        # 1. filefrag -v gets the map.
-        # 2. awk looks for the first extent (0:).
-        # 3. print $4 gets the physical address block.
-        # 4. sed 's/\.\.//' removes the trailing dots.
-        # 5. head -n 1 ensures we ONLY get the first number.
         SWAP_OFFSET=$(filefrag -v /swap.img | awk '{if($1=="0:"){print $4}}' | sed 's/\.\.//' | head -n 1)
     fi
     RUNNING_CMDLINE=$(cat /proc/cmdline)
 }
 
-# --- Function: Robust Hibernation Test ---
-run_hibernation_test() {
-    get_specs
-    echo -e "\n=== Pre-Test Validation ==="
-    
-    # Check Secure Boot
-    if command -v mokutil &> /dev/null && mokutil --sb-state | grep -q "enabled"; then
-        echo "❌ ERROR: Secure Boot is ENABLED. Hibernation is blocked by Kernel Lockdown."
-        return 1
-    fi
+# --- Function: Restore USB Wakeup ---
+undo_usb() {
+    echo -e "\n=== Restoring USB Wakeup Support ==="
+    rm -f /etc/tmpfiles.d/disable-usb-wakeup.conf
+    for dev in XHC EHC EHC1 EHC2 XHCI; do
+        if grep -q "$dev.*disabled" /proc/acpi/wakeup 2>/dev/null; then
+            echo "$dev" > /proc/acpi/wakeup
+        fi
+    done
+    echo "✔ RESTORED. USB devices can now wake the system from sleep."
+}
 
-    # Kernel Sync Validation
-    if [[ -z "$SWAP_OFFSET" ]] || [[ "$RUNNING_CMDLINE" != *"$SWAP_OFFSET"* ]]; then
-        echo "❌ ERROR: Kernel parameters are not synced with disk."
-        echo "   File Offset (Disk): $SWAP_OFFSET"
-        echo "   Active Offset (RAM): $(echo $RUNNING_CMDLINE | grep -o 'resume_offset=[0-9]*' || echo 'none')"
-        echo "   ACTION: Run with --resize, then REBOOT your computer."
-        return 1
-    fi
+# --- Function: Install Desktop Integration ---
+install_hibernate_button() {
+    echo -e "\n=== Installing Hibernate Desktop Shortcut ==="
+    POLKIT_DIR="/etc/polkit-1/localauthority/50-local.d"
+    mkdir -p "$POLKIT_DIR"
+    cat <<EOF > "$POLKIT_DIR/com.ubuntu.enable-hibernate.pkla"
+[Enable Hibernate]
+Identity=unix-user:*
+Action=org.freedesktop.upower.hibernate;org.freedesktop.login1.hibernate;org.freedesktop.login1.handle-hibernate-key;org.freedesktop.login1.hibernate-ignore-inhibit;org.freedesktop.login1.hibernate-multiple-sessions
+ResultActive=yes
+EOF
 
-    echo "✅ Validation passed. Starting test..."
-    if ! echo test_resume > /sys/power/disk 2>/dev/null; then
-        echo "❌ ERROR: Device busy. Close open apps or reboot to clear locks."
-        return 1
-    fi
-
-    echo "System freezing (test mode)... will resume automatically in 5 seconds."
-    sync && sleep 3
-    
-    if ! echo disk > /sys/power/state 2>/dev/null; then
-        echo "❌ ERROR: Trigger failed. Kernel rejected the save state."
-        return 1
-    fi
-    echo "✔ Test cycle complete. Your configuration is now working!"
+    LAUNCHER_PATH="/usr/share/applications/hibernate.desktop"
+    cat <<EOF > "$LAUNCHER_PATH"
+[Desktop Entry]
+Name=Hibernate
+Comment=Save RAM to disk and power off
+Exec=systemctl hibernate
+Icon=system-suspend-hibernate
+Terminal=false
+Type=Application
+Categories=System;Settings;
+Keywords=hibernate;sleep;power;
+EOF
+    chmod +x "$LAUNCHER_PATH"
+    echo "✔ DONE. 'Hibernate' is now in your Applications menu."
 }
 
 # --- Function: Size Optimizer & Config Sync ---
 optimize_swap_size() {
     echo -e "\n=== Swap Size Optimizer & Sync ==="
     TOTAL_RAM_KB=$(grep MemTotal /proc/meminfo | awk '{print $2}')
-    # TARGET: RAM + 4GB Buffer (Calculates to ~28GB for 24GB RAM system)
     TARGET_GB=$(( (TOTAL_RAM_KB / 1024 / 1024) + 4 )) 
     
     echo "Targeting ${TARGET_GB}GB Swap file..."
+    swapoff /swap.img 2>/dev/null; rm -f /swap.img
+    fallocate -l "${TARGET_GB}G" /swap.img
+    chmod 600 /swap.img; mkswap /swap.img; swapon /swap.img
+    get_specs
     
-    if ! $DRYRUN; then
-        echo "Deactivating and removing old swap..."
-        swapoff /swap.img 2>/dev/null
-        rm -f /swap.img
-        
-        echo "Allocating contiguous space (28GB may take a minute)..."
-        fallocate -l "${TARGET_GB}G" /swap.img
-        chmod 600 /swap.img
-        mkswap /swap.img
-        swapon /swap.img
-        
-        # Refresh specs for the NEW file
-        get_specs
-        
-        echo "Updating Initramfs (UUID: $SWAP_UUID)..."
-        echo "RESUME=UUID=$SWAP_UUID" > /etc/initramfs-tools/conf.d/resume
-        update-initramfs -u
-        
-        echo "Updating GRUB configuration (Safe Clean Method)..."
-        NEW_PARAMS="quiet splash resume=UUID=$SWAP_UUID resume_offset=$SWAP_OFFSET"
-        
-        # Backup and rewrite GRUB file to fix any previous corruption
-        cp /etc/default/grub /etc/default/grub.bak
-        # Remove any existing CMDLINE lines and append a clean one
-        grep -v "GRUB_CMDLINE_LINUX_DEFAULT" /etc/default/grub.bak > /etc/default/grub
-        echo "GRUB_CMDLINE_LINUX_DEFAULT=\"$NEW_PARAMS\"" >> /etc/default/grub
-        
-        update-grub
-        
-        echo -e "\n✔ DONE. Configurations are now synchronized with offset: $SWAP_OFFSET"
-        echo "⚠️  CRITICAL: You MUST REBOOT now for the kernel to load this offset."
-    else
-        echo "[Dry-Run] Would create ${TARGET_GB}GB swap and update all configs."
+    echo "Updating Initramfs and GRUB..."
+    echo "RESUME=UUID=$SWAP_UUID" > /etc/initramfs-tools/conf.d/resume
+    update-initramfs -u
+    
+    NEW_PARAMS="quiet splash resume=UUID=$SWAP_UUID resume_offset=$SWAP_OFFSET"
+    cp /etc/default/grub /etc/default/grub.bak
+    grep -v "GRUB_CMDLINE_LINUX_DEFAULT" /etc/default/grub.bak > /etc/default/grub
+    echo "GRUB_CMDLINE_LINUX_DEFAULT=\"$NEW_PARAMS\"" >> /etc/default/grub
+    update-grub
+    echo -e "\n✔ SUCCESS. REBOOT REQUIRED."
+}
+
+# --- Function: Deep Purge Test Mode ---
+run_test() {
+    get_specs
+    
+    # Secure Boot Check
+    if command -v mokutil &> /dev/null && mokutil --sb-state | grep -q "enabled"; then
+        echo "❌ ERROR: Secure Boot is ENABLED. Linux blocks hibernation in this mode."
+        exit 1
     fi
+
+    echo "✅ Step 1: Deep Purging USB Hub Tasks (Module Reload)..."
+    # Unload HID (Keyboard/Mouse) drivers
+    modprobe -r usbhid 2>/dev/null
+    
+    # Unbind USB controllers
+    for xhci in /sys/bus/pci/drivers/xhci_hcd/[0-9]*; do
+        [ -e "$xhci" ] || continue
+        echo "$(basename "$xhci")" > /sys/bus/pci/drivers/xhci_hcd/unbind 2>/dev/null
+    done
+
+    echo "✅ Step 2: Settling kernel... (Peripherals DISCONNECTED for 8s)"
+    sync && udevadm settle
+    sleep 8
+    
+    echo test_resume > /sys/power/disk
+    
+    if echo disk > /sys/power/state; then
+        echo -e "\n***************************************************"
+        echo "✅ TEST SUCCESSFUL: Hibernation is working!"
+        echo "The kernel successfully mapped and verified memory."
+        echo "***************************************************"
+    else
+        echo -e "\n❌ ERROR: Still Busy (usb_hub_wq)."
+        echo "This indicates a BIOS or hardware-level lockup on the USB bus."
+    fi
+
+    # RESTORE Drivers
+    echo -e "\n✅ Step 4: Reconnecting USB Controllers and Drivers..."
+    for xhci in /sys/bus/pci/devices/*; do
+        [ -e "$xhci/config" ] || continue
+        # Try to bind everything back to xhci_hcd
+        echo "$(basename "$xhci")" > /sys/bus/pci/drivers/xhci_hcd/bind 2>/dev/null
+    done
+    modprobe usbhid 2>/dev/null
 }
 
 # --- Main Logic ---
-if $RESIZE_SWAP; then optimize_swap_size; exit 0; fi
-if $RUN_TEST; then run_hibernation_test; exit 0; fi
-
-# Default Diagnostic Mode
-get_specs
-echo "=== Hibernate Diagnostic ==="
-echo "RAM Total:   $(free -h | awk '/^Mem:/ {print $2}')"
-echo "Active Swap: $(swapon --show --noheadings | awk '{print $1}')"
-if [ -f /swap.img ]; then
-    echo "File UUID:   $SWAP_UUID"
-    echo "File Offset: $SWAP_OFFSET"
-fi
-
-# USB Wakeup Check
-WAKEUP_LIST=$(grep -E "XHC|EHC|USB" /proc/acpi/wakeup)
-if echo "$WAKEUP_LIST" | grep -q "*enabled"; then
-    echo -e "\n⚠️ USB controllers are enabled for wakeup. This can abort hibernation."
-    if ! $DRYRUN; then
-        read -p "Apply permanent USB wakeup fix? [y/N] " ans
-        if [[ "$ans" == "y" ]]; then
-            CONF_FILE="/etc/tmpfiles.d/disable-usb-wakeup.conf"
-            echo "# Generated by hibernate-check-repair.sh" > $CONF_FILE
-            for DEV in $(echo "$WAKEUP_LIST" | grep "*enabled" | awk '{print $1}'); do
-                echo "w /proc/acpi/wakeup - - - - $DEV" >> $CONF_FILE
-                echo $DEV > /proc/acpi/wakeup
-            done
-            echo "✔ Fix applied to $CONF_FILE"
-        fi
-    fi
-fi
-
-echo -e "\n=== End of Diagnostic ==="
-echo "Recommended: Run 'sudo ./hibernate-check-repair.sh --resize' then REBOOT."
+case "$1" in
+    -h|--help) show_help; exit 0 ;;
+    -s|--resize) optimize_swap_size ;;
+    -t|--test) run_test ;;
+    -i|--install-button) install_hibernate_button ;;
+    -u|--undo-usb) undo_usb ;;
+    "")
+        get_specs
+        echo "=== Diagnostic Status for hibernate-check-fix.sh ==="
+        echo "Swap Offset: $SWAP_OFFSET"
+        cat /proc/acpi/wakeup | grep -E "XHC|EHC|USB"
+        ;;
+    *) show_help; exit 1 ;;
+esac
