@@ -1,6 +1,6 @@
 #!/bin/bash
 # hibernate-check-fix.sh
-# Version 6.7 - Module Reload & Hub Purge Edition
+# Version 6.8 - Log Analyzer & Hub Purge Edition
 # Optimized for Dell Wireless Dongle & usb_hub_wq errors
 
 show_help() {
@@ -8,10 +8,11 @@ show_help() {
     echo ""
     echo "Options:"
     echo "  -h, --help           Show this help message"
-    echo "  -s, --resize         Optimize swap (28GB) and sync kernel configs"
+    echo "  -s, --resize         Optimize swap (RAM + 4GB) and sync kernel configs"
     echo "  -t, --test           Run hibernation test (Forces Hub & Driver Reset)"
     echo "  -i, --install-button Install 'Hibernate' icon to your App Menu"
     echo "  -u, --undo-usb       RESTORE USB wake support (Fixes Dell Keyboard)"
+    echo "  -a, --analyze        Analyze kernel logs for hibernation issues"
     echo ""
 }
 
@@ -27,7 +28,44 @@ get_specs() {
         SWAP_UUID=$(blkid -s UUID -o value /swap.img)
         SWAP_OFFSET=$(filefrag -v /swap.img | awk '{if($1=="0:"){print $4}}' | sed 's/\.\.//' | head -n 1)
     fi
-    RUNNING_CMDLINE=$(cat /proc/cmdline)
+}
+
+# --- Function: Kernel Log Analyzer ---
+analyze_logs() {
+    echo -e "\n=== Hibernation Kernel Log Analyzer ==="
+    echo "Searching for recent PM (Power Management) events..."
+    echo "----------------------------------------------------"
+
+    # Check for Secure Boot Lockdowns
+    if dmesg | grep -qi "Lockdown:.*hibernation is restricted"; then
+        echo "🚩 ALERT: Kernel is locked down. Secure Boot is likely preventing hibernation."
+    fi
+
+    # Check for freezing failures (Commonly caused by runaway processes or USB)
+    FREEZE_ERR=$(journalctl -k --since "24 hours ago" | grep -i "Freezing of tasks failed")
+    if [ ! -z "$FREEZE_ERR" ]; then
+        echo "🚩 ALERT: Task freezing failed recently:"
+        echo "$FREEZE_ERR" | tail -n 3
+    fi
+
+    # Check for Image size issues
+    if dmesg | grep -qi "not enough memory to create binary image"; then
+        echo "🚩 ALERT: Hibernation failed due to insufficient memory/swap space."
+    fi
+
+    # Check for specific USB Hub errors mentioned in script header
+    USB_ERR=$(dmesg | grep -iE "usb_hub_wq|xhci_hcd.*error")
+    if [ ! -z "$USB_ERR" ]; then
+        echo "🚩 ALERT: USB Controller/Hub errors detected:"
+        echo "$USB_ERR" | tail -n 3
+    fi
+
+    echo -e "\nSummary of last hibernation attempt (last 50 PM logs):"
+    journalctl -k | grep -Ei "PM: (hibernation|suspend|image|thawing|freezing)" | tail -n 20
+
+    if [ $? -ne 0 ]; then
+        echo "No hibernation logs found in current boot session."
+    fi
 }
 
 # --- Function: Restore USB Wakeup ---
@@ -105,10 +143,8 @@ run_test() {
     fi
 
     echo "✅ Step 1: Deep Purging USB Hub Tasks (Module Reload)..."
-    # Unload HID (Keyboard/Mouse) drivers
     modprobe -r usbhid 2>/dev/null
     
-    # Unbind USB controllers
     for xhci in /sys/bus/pci/drivers/xhci_hcd/[0-9]*; do
         [ -e "$xhci" ] || continue
         echo "$(basename "$xhci")" > /sys/bus/pci/drivers/xhci_hcd/unbind 2>/dev/null
@@ -127,14 +163,14 @@ run_test() {
         echo "***************************************************"
     else
         echo -e "\n❌ ERROR: Still Busy (usb_hub_wq)."
-        echo "This indicates a BIOS or hardware-level lockup on the USB bus."
+        echo "Checking logs for immediate clues..."
+        analyze_logs
     fi
 
     # RESTORE Drivers
     echo -e "\n✅ Step 4: Reconnecting USB Controllers and Drivers..."
     for xhci in /sys/bus/pci/devices/*; do
         [ -e "$xhci/config" ] || continue
-        # Try to bind everything back to xhci_hcd
         echo "$(basename "$xhci")" > /sys/bus/pci/drivers/xhci_hcd/bind 2>/dev/null
     done
     modprobe usbhid 2>/dev/null
@@ -147,6 +183,7 @@ case "$1" in
     -t|--test) run_test ;;
     -i|--install-button) install_hibernate_button ;;
     -u|--undo-usb) undo_usb ;;
+    -a|--analyze) analyze_logs ;;
     "")
         get_specs
         echo "=== Diagnostic Status for hibernate-check-fix.sh ==="
