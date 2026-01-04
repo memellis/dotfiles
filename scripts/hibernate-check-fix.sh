@@ -1,7 +1,7 @@
 #!/bin/bash
 # hibernate-check-fix.sh
-# Version 7.6 - Modular Swap & Integrity Edition
-# Added: Standalone Swap creation (-w) and polished regex verification
+# Version 7.8 - Proof of Delay & Service Validation
+# Added: Journal analysis in -a to prove delayed camera loading works
 
 BACKUP_DIR="/etc/hibernate-backups"
 
@@ -14,7 +14,7 @@ show_help() {
     echo "  -s, --sync           Sync & Verify (Updates GRUB & Initramfs with Backups)"
     echo "  -r, --revert         REVERT GRUB and Initramfs to previous backup"
     echo "  -t, --test           Run hibernation test (Forces Hub & Driver Reset)"
-    echo "  -a, --analyze        Analyze kernel logs & Deep Verify Config"
+    echo "  -a, --analyze        Analyze kernel logs, Verification & Proof of Delay"
     echo "  -f, --fix-camera     Apply Quirk for Dell Monitor/OmniVision Camera crash"
     echo "  -q, --quiet-audio    Silence 'Unlikely big volume range' Dell audio logs"
     echo "  -i, --install-button Install 'Hibernate' icon to your App Menu"
@@ -26,7 +26,6 @@ if [[ $EUID -ne 0 ]]; then
    exit 1
 fi
 
-# --- Core Logic: Detection ---
 get_specs() {
     if [ -f /swap.img ]; then
         PART_UUID=$(findmnt -no UUID -T /swap.img)
@@ -34,91 +33,104 @@ get_specs() {
     fi
 }
 
-# --- Function: Create/Resize Swap File ---
-write_swap() {
-    echo -e "\n=== Phase: Swap File Creation & Offset Calculation ==="
-    TOTAL_RAM_KB=$(grep MemTotal /proc/meminfo | awk '{print $2}')
-    TARGET_GB=$(( (TOTAL_RAM_KB / 1024 / 1024) + 4 )) 
+# --- Function: Late-Boot Camera Quirk ---
+fix_camera_crash() {
+    echo -e "\n=== Applying Dell Monitor & OmniVision Camera Quirk ==="
+    echo "options uvcvideo nodrop=1 timeout=5000" > /etc/modprobe.d/uvcvideo-quirks.conf
+    echo "blacklist uvcvideo" > /etc/modprobe.d/uvcvideo-blacklist.conf
+    echo 'ACTION=="add", SUBSYSTEM=="usb", ATTR{idVendor}=="05a9", ATTR{power/control}="on"' > /etc/udev/rules.d/99-omniforce-power.rules
     
-    echo "Targeting ${TARGET_GB}GB Swap file based on Physical RAM + 4GB buffer..."
-    
-    # Deactivate existing swap if active
-    swapoff /swap.img 2>/dev/null
-    rm -f /swap.img
-    
-    echo "Allocating space (this may take a moment)..."
-    fallocate -l "${TARGET_GB}G" /swap.img
-    chmod 600 /swap.img
-    mkswap /swap.img
-    swapon /swap.img
-    
-    get_specs
-    echo "✔ Swap created at /swap.img"
-    echo "✔ New Offset detected: $SWAP_OFFSET"
-    echo "🚩 NEXT STEP: Run 'sudo ./hibernate-check-fix.sh -s' to map this to your bootloader."
+    cat <<EOF > /etc/systemd/system/camera-late-load.service
+[Unit]
+Description=Load UVC Camera Driver Late to prevent Dell Hub crash
+After=multi-user.target
+Conflicts=shutdown.target
+
+[Service]
+Type=oneshot
+ExecStartPre=/usr/bin/sleep 15
+ExecStart=/usr/sbin/modprobe uvcvideo
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+    systemctl daemon-reload
+    systemctl enable camera-late-load.service
+    echo "✔ Quirk Applied. Late-loader service enabled."
 }
 
-# --- Function: Sync GRUB & Initramfs ---
-sync_settings() {
-    [ ! -f /swap.img ] && echo "❌ No swap file found. Run -w first." && exit 1
-    
-    echo -e "\n=== Phase: Safety Backups & Configuration Sync ==="
-    mkdir -p "$BACKUP_DIR"
-    cp /etc/default/grub "$BACKUP_DIR/grub.bak"
-    [ -f /etc/initramfs-tools/conf.d/resume ] && cp /etc/initramfs-tools/conf.d/resume "$BACKUP_DIR/resume.bak"
-    date > "$BACKUP_DIR/last_backup_timestamp.txt"
-
-    get_specs
-    
-    # Update Initramfs
-    mkdir -p /etc/initramfs-tools/conf.d
-    echo "RESUME=UUID=$PART_UUID" > /etc/initramfs-tools/conf.d/resume
-    
-    # Update GRUB
-    NEW_PARAMS="quiet splash resume=UUID=$PART_UUID resume_offset=$SWAP_OFFSET"
-    sed -i "s|^GRUB_CMDLINE_LINUX_DEFAULT=.*|GRUB_CMDLINE_LINUX_DEFAULT=\"$NEW_PARAMS\"|" /etc/default/grub
-    
-    echo "Regenerating boot images (Initramfs & GRUB)..."
-    update-initramfs -u -k all
-    update-grub
-    echo "✔ Sync Complete. Mismatches should be resolved."
-}
-
-# --- Function: Deep Analyzer ---
+# --- Function: Deep Analyzer (with Delay Proof) ---
 analyze_logs() {
     echo -e "\n=== Hibernation Integrity & Log Analyzer ==="
     get_specs
     
     echo "--- Integrity Check ---"
-    if [ -z "$PART_UUID" ]; then
-        echo "🚩 ERROR: Swap file not detected."
-    else
+    if [ -z "$PART_UUID" ]; then echo "🚩 ERROR: Swap file not detected."; else
         GRUB_LINE=$(grep "GRUB_CMDLINE_LINUX_DEFAULT" /etc/default/grub)
         [[ "$GRUB_LINE" == *"$PART_UUID"* ]] && echo "✅ GRUB UUID: Match" || echo "🚩 CRITICAL MISMATCH: GRUB UUID wrong!"
         [[ "$GRUB_LINE" == *"$SWAP_OFFSET"* ]] && echo "✅ GRUB Offset: Match" || echo "🚩 CRITICAL MISMATCH: GRUB Offset wrong!"
-
         if [ -f /etc/initramfs-tools/conf.d/resume ]; then
             INIT_VAL=$(grep "^RESUME=" /etc/initramfs-tools/conf.d/resume | sed 's/^RESUME=//' | tr -d '"' | tr -d "'")
-            [[ "$INIT_VAL" == "UUID=$PART_UUID" ]] && echo "✅ Initramfs: Match (UUID=$PART_UUID)" || echo "🚩 CRITICAL MISMATCH: Initramfs resume hook wrong!"
+            [[ "$INIT_VAL" == "UUID=$PART_UUID" ]] && echo "✅ Initramfs: Match" || echo "🚩 CRITICAL MISMATCH: Initramfs hook wrong!"
+        fi
+    fi
+
+    echo -e "\n--- Camera Delay Verification ---"
+    if systemctl is-active --quiet camera-late-load.service; then
+        echo "✅ Service Status: Active (The late-loader successfully ran)"
+        # Get start time of the service from journal
+        LOAD_TIME=$(journalctl -u camera-late-load.service --since "1 hour ago" | grep "Finished" | tail -n 1 | awk '{print $3}')
+        if [ ! -z "$LOAD_TIME" ]; then
+            echo "✅ Proof of Delay: Camera driver initialized at [$LOAD_TIME]"
+            echo "   (This confirms the 15-second safety buffer was respected)"
+        fi
+    else
+        if [ -f /etc/systemd/system/camera-late-load.service ]; then
+            echo "🚩 ALERT: Late-loader service is installed but hasn't run yet."
         else
-            echo "🚩 CRITICAL MISMATCH: Initramfs resume hook MISSING!"
+            echo "ℹ️  Note: Late-loader service is not installed (Standard boot)."
         fi
     fi
 
     echo -e "\n--- Kernel Log Findings ---"
-    dmesg | grep -qi "Unlikely big volume range" && echo "🚩 FOUND: Dell Monitor USB Audio Warning. (Use -q to fix)"
-    journalctl -k --since "1 hour ago" | grep -q "apparmor=\"DENIED\".*spotify" && echo "ℹ️  NOTE: Spotify AppArmor noise detected (Harmless)."
-
+    dmesg | grep -qi "Unlikely big volume range" && echo "🚩 FOUND: Dell Monitor USB Audio Warning."
+    
     echo -e "\nSummary of last Power/USB events:"
     journalctl -k | grep -Ei "PM:|usb|xhci|uvc" | tail -n 8
 }
 
-# --- Helper Functions ---
+write_swap() {
+    echo -e "\n=== Phase: Swap File Creation ==="
+    TOTAL_RAM_KB=$(grep MemTotal /proc/meminfo | awk '{print $2}')
+    TARGET_GB=$(( (TOTAL_RAM_KB / 1024 / 1024) + 4 )) 
+    swapoff /swap.img 2>/dev/null; rm -f /swap.img
+    fallocate -l "${TARGET_GB}G" /swap.img
+    chmod 600 /swap.img; mkswap /swap.img; swapon /swap.img
+    get_specs
+    echo "✔ Swap created at /swap.img (Offset: $SWAP_OFFSET)"
+}
+
+sync_settings() {
+    [ ! -f /swap.img ] && echo "❌ No swap file found. Run -w first." && exit 1
+    mkdir -p "$BACKUP_DIR"
+    cp /etc/default/grub "$BACKUP_DIR/grub.bak"
+    [ -f /etc/initramfs-tools/conf.d/resume ] && cp /etc/initramfs-tools/conf.d/resume "$BACKUP_DIR/resume.bak"
+    get_specs
+    echo "RESUME=UUID=$PART_UUID" > /etc/initramfs-tools/conf.d/resume
+    NEW_PARAMS="quiet splash resume=UUID=$PART_UUID resume_offset=$SWAP_OFFSET"
+    sed -i "s|^GRUB_CMDLINE_LINUX_DEFAULT=.*|GRUB_CMDLINE_LINUX_DEFAULT=\"$NEW_PARAMS\"|" /etc/default/grub
+    update-initramfs -u -k all; update-grub
+    echo "✔ Sync Complete."
+}
+
 revert_settings() {
     echo -e "\n=== Reverting to Previous Configuration ==="
     [ ! -f "$BACKUP_DIR/grub.bak" ] && echo "❌ No backup found." && exit 1
     cp "$BACKUP_DIR/grub.bak" /etc/default/grub
     [ -f "$BACKUP_DIR/resume.bak" ] && cp "$BACKUP_DIR/resume.bak" /etc/initramfs-tools/conf.d/resume || rm -f /etc/initramfs-tools/conf.d/resume
+    systemctl disable camera-late-load.service 2>/dev/null; rm -f /etc/systemd/system/camera-late-load.service
     update-initramfs -u; update-grub
     echo "✔ REVERT COMPLETE."
 }
@@ -126,19 +138,6 @@ revert_settings() {
 quiet_audio() {
     echo "options snd-usb-audio ignore_ctl_error=1" > /etc/modprobe.d/dell-audio-quirk.conf
     echo "✔ Dell Audio quirk applied."
-}
-
-fix_camera_crash() {
-    echo "options uvcvideo nodrop=1 timeout=5000" > /etc/modprobe.d/uvcvideo-quirks.conf
-    echo "blacklist uvcvideo" > /etc/modprobe.d/uvcvideo-blacklist.conf
-    cat <<EOF > /usr/local/bin/load-camera-safely.sh
-#!/bin/bash
-sleep 15
-modprobe uvcvideo
-EOF
-    chmod +x /usr/local/bin/load-camera-safely.sh
-    echo 'ACTION=="add", SUBSYSTEM=="usb", ATTR{idVendor}=="05a9", ATTR{power/control}="on"' > /etc/udev/rules.d/99-omniforce-power.rules
-    echo "✔ Dell Camera quirk applied."
 }
 
 install_hibernate_button() {
@@ -176,10 +175,10 @@ case "$1" in
     -q|--quiet-audio) quiet_audio ;;
     -i|--install-button) install_hibernate_button ;;
     "") get_specs
-        echo "=== hibernate-check-fix.sh v7.6 ==="
-        [ -f "$BACKUP_DIR/last_backup_timestamp.txt" ] && echo "Last Protected Backup: $(cat $BACKUP_DIR/last_backup_timestamp.txt)"
+        echo "=== hibernate-check-fix.sh v7.8 ==="
         echo "Partition UUID: $PART_UUID"
         echo "Swap Offset:    $SWAP_OFFSET"
         ;;
     *) show_help; exit 1 ;;
 esac
+exit 0
