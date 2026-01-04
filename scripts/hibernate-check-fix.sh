@@ -1,203 +1,137 @@
 #!/bin/bash
 # hibernate-check-fix.sh
-# Version 6.9.1 - Consolidated Edition
-# Fixes: Hibernation setup, Kernel Log Analysis, and Dell/OmniVision Boot Crashes.
+# Version 7.5 - Regex Parsing & Audio Quirk Edition
+# Fixes: Initramfs comparison logic & Dell Audio log spam
+
+BACKUP_DIR="/etc/hibernate-backups"
 
 show_help() {
     echo "Usage: sudo ./hibernate-check-fix.sh [OPTIONS]"
     echo ""
     echo "Options:"
     echo "  -h, --help           Show this help message"
-    echo "  -s, --resize         Optimize swap (RAM + 4GB) and sync kernel configs"
-    echo "  -t, --test           Run hibernation test (Forces Hub & Driver Reset)"
-    echo "  -i, --install-button Install 'Hibernate' icon to your App Menu"
-    echo "  -u, --undo-usb       RESTORE USB wake support (Fixes Dell Keyboard)"
-    echo "  -a, --analyze        Analyze kernel logs for hibernation/USB issues"
+    echo "  -s, --sync           Sync & Verify (Takes Backup & Forces Initramfs Hook)"
+    echo "  -r, --revert         REVERT GRUB and Initramfs to the previous backup"
+    echo "  -t, --test           Run hibernation test"
+    echo "  -a, --analyze        Analyze kernel logs & Deep Verify Config"
     echo "  -f, --fix-camera     Apply Quirk for Dell Monitor/OmniVision Camera crash"
+    echo "  -q, --quiet-audio    Silence 'Unlikely big volume range' Dell audio logs"
     echo ""
 }
 
-# Ensure root privileges
 if [[ $EUID -ne 0 ]]; then
    echo "Error: This script must be run with sudo."
    exit 1
 fi
 
-# --- Helper: Gather specs ---
 get_specs() {
-    if [ -f /swap.img ]; then
-        SWAP_UUID=$(blkid -s UUID -o value /swap.img)
-        SWAP_OFFSET=$(filefrag -v /swap.img | awk '{if($1=="0:"){print $4}}' | sed 's/\.\.//' | head -n 1)
-    fi
+    # Get the raw UUID of the partition
+    PART_UUID=$(findmnt -no UUID -T /swap.img)
+    # Get the physical offset
+    SWAP_OFFSET=$(filefrag -v /swap.img | awk '{if($1=="0:"){print $4}}' | sed 's/\.\.//' | head -n 1)
 }
 
-# --- Function: Dell Monitor / OmniVision Quirk ---
-fix_camera_crash() {
-    echo -e "\n=== Applying Dell Monitor & OmniVision Camera Fix ==="
-    
-    # 1. Prevent uvcvideo from loading too early (common crash point)
-    echo "options uvcvideo nodrop=1 timeout=5000" > /etc/modprobe.d/uvcvideo-quirks.conf
-    echo "blacklist uvcvideo" > /etc/modprobe.d/uvcvideo-blacklist.conf
-    
-    # 2. Create a script to load it safely after login
-    cat <<EOF > /usr/local/bin/load-camera-safely.sh
-#!/bin/bash
-# Script created by hibernate-check-fix.sh
-sleep 15
-modprobe uvcvideo
-EOF
-    chmod +x /usr/local/bin/load-camera-safely.sh
-
-    # 3. Disable USB Autosuspend for the Monitor Hub (OmniVision vendor ID: 05a9)
-    echo 'ACTION=="add", SUBSYSTEM=="usb", ATTR{idVendor}=="05a9", ATTR{power/control}="on"' > /etc/udev/rules.d/99-omniforce-power.rules
-    
-    echo "✔ Quirk Applied. Camera driver blacklisted from boot."
-    echo "✔ Created /usr/local/bin/load-camera-safely.sh to load camera manually/later."
-    echo "⚠️  REBOOT REQUIRED to prevent the boot-time crash."
+# --- Function: Quiet Dell Audio Logs ---
+# This creates a modprobe rule to ignore the specific quirks of the Dell monitor's audio chip
+quiet_audio() {
+    echo -e "\n=== Silencing Dell USB Audio Warning ==="
+    echo "options snd-usb-audio ignore_ctl_error=1" > /etc/modprobe.d/dell-audio-quirk.conf
+    echo "✔ Applied. This will stop the 'Unlikely big volume range' spam after reboot."
 }
 
-# --- Function: Kernel Log Analyzer ---
-analyze_logs() {
-    echo -e "\n=== Hibernation & Crash Log Analyzer ==="
-    echo "Searching for recent events..."
-    echo "----------------------------------------------------"
+sync_settings() {
+    echo -e "\n=== Phase 1: Creating Safety Backups ==="
+    mkdir -p "$BACKUP_DIR"
+    cp /etc/default/grub "$BACKUP_DIR/grub.bak"
+    [ -f /etc/initramfs-tools/conf.d/resume ] && cp /etc/initramfs-tools/conf.d/resume "$BACKUP_DIR/resume.bak"
+    date > "$BACKUP_DIR/last_backup_timestamp.txt"
 
-    # Check for OmniVision/USB-related crashes
-    if dmesg | grep -qiE "uvcvideo|OmniVision|05a9|usb_hub_wq"; then
-        echo "🚩 FOUND: Camera or USB Hub related kernel events."
-    fi
-
-    # Check for Secure Boot
-    if dmesg | grep -qi "Lockdown:.*hibernation is restricted"; then
-        echo "🚩 ALERT: Secure Boot is blocking hibernation."
-    fi
-
-    # Check for Freezing tasks failure
-    FREEZE_ERR=$(journalctl -k --since "24 hours ago" | grep -i "Freezing of tasks failed")
-    if [ ! -z "$FREEZE_ERR" ]; then
-        echo "🚩 ALERT: A process or driver blocked hibernation recently:"
-        echo "$FREEZE_ERR" | tail -n 2
-    fi
-
-    echo -e "\nSummary of last Power/USB events (last 15 lines):"
-    journalctl -k | grep -Ei "PM:|usb|xhci|uvc" | tail -n 15
-}
-
-# --- Function: Restore USB Wakeup ---
-undo_usb() {
-    echo -e "\n=== Restoring USB Wakeup Support ==="
-    rm -f /etc/tmpfiles.d/disable-usb-wakeup.conf
-    for dev in XHC EHC EHC1 EHC2 XHCI; do
-        if grep -q "$dev.*disabled" /proc/acpi/wakeup 2>/dev/null; then
-            echo "$dev" > /proc/acpi/wakeup
-        fi
-    done
-    echo "✔ RESTORED. USB devices can now wake the system."
-}
-
-# --- Function: Install Desktop Integration ---
-install_hibernate_button() {
-    echo -e "\n=== Installing Hibernate Desktop Shortcut ==="
-    POLKIT_DIR="/etc/polkit-1/localauthority/50-local.d"
-    mkdir -p "$POLKIT_DIR"
-    cat <<EOF > "$POLKIT_DIR/com.ubuntu.enable-hibernate.pkla"
-[Enable Hibernate]
-Identity=unix-user:*
-Action=org.freedesktop.upower.hibernate;org.freedesktop.login1.hibernate;org.freedesktop.login1.handle-hibernate-key;org.freedesktop.login1.hibernate-ignore-inhibit;org.freedesktop.login1.hibernate-multiple-sessions
-ResultActive=yes
-EOF
-
-    LAUNCHER_PATH="/usr/share/applications/hibernate.desktop"
-    cat <<EOF > "$LAUNCHER_PATH"
-[Desktop Entry]
-Name=Hibernate
-Comment=Save RAM to disk and power off
-Exec=systemctl hibernate
-Icon=system-suspend-hibernate
-Terminal=false
-Type=Application
-Categories=System;Settings;
-Keywords=hibernate;sleep;power;
-EOF
-    chmod +x "$LAUNCHER_PATH"
-    echo "✔ DONE. 'Hibernate' is now in your Applications menu."
-}
-
-# --- Function: Size Optimizer & Config Sync ---
-optimize_swap_size() {
-    echo -e "\n=== Swap Size Optimizer & Sync ==="
-    TOTAL_RAM_KB=$(grep MemTotal /proc/meminfo | awk '{print $2}')
-    TARGET_GB=$(( (TOTAL_RAM_KB / 1024 / 1024) + 4 )) 
-    
-    echo "Targeting ${TARGET_GB}GB Swap file..."
-    swapoff /swap.img 2>/dev/null; rm -f /swap.img
-    fallocate -l "${TARGET_GB}G" /swap.img
-    chmod 600 /swap.img; mkswap /swap.img; swapon /swap.img
-    
+    echo -e "\n=== Phase 2: Syncing Configurations ==="
     get_specs
     
-    echo "Updating Initramfs and GRUB..."
-    echo "RESUME=UUID=$SWAP_UUID" > /etc/initramfs-tools/conf.d/resume
-    update-initramfs -u
+    # Standardize Initramfs file
+    mkdir -p /etc/initramfs-tools/conf.d
+    echo "RESUME=UUID=$PART_UUID" > /etc/initramfs-tools/conf.d/resume
     
-    NEW_PARAMS="quiet splash resume=UUID=$SWAP_UUID resume_offset=$SWAP_OFFSET"
-    cp /etc/default/grub /etc/default/grub.bak
-    grep -v "GRUB_CMDLINE_LINUX_DEFAULT" /etc/default/grub.bak > /etc/default/grub
-    echo "GRUB_CMDLINE_LINUX_DEFAULT=\"$NEW_PARAMS\"" >> /etc/default/grub
+    # Standardize GRUB
+    NEW_PARAMS="quiet splash resume=UUID=$PART_UUID resume_offset=$SWAP_OFFSET"
+    sed -i "s|^GRUB_CMDLINE_LINUX_DEFAULT=.*|GRUB_CMDLINE_LINUX_DEFAULT=\"$NEW_PARAMS\"|" /etc/default/grub
+    
+    echo "Regenerating boot images... (Updating both Initramfs and GRUB)"
+    update-initramfs -u -k all
     update-grub
-    echo -e "\n✔ SUCCESS. REBOOT REQUIRED."
+    echo "✔ Sync Complete. Mismatches should be resolved."
 }
 
-# --- Function: Deep Purge Test Mode ---
-run_test() {
+analyze_logs() {
+    echo -e "\n=== Hibernation Integrity & Log Analyzer ==="
     get_specs
-    if command -v mokutil &> /dev/null && mokutil --sb-state | grep -q "enabled"; then
-        echo "❌ ERROR: Secure Boot is ENABLED. Linux blocks hibernation in this mode."
-        exit 1
-    fi
+    
+    echo "--- Integrity Check ---"
+    GRUB_LINE=$(grep "GRUB_CMDLINE_LINUX_DEFAULT" /etc/default/grub)
+    [[ "$GRUB_LINE" == *"$PART_UUID"* ]] && echo "✅ GRUB UUID: Match" || echo "🚩 CRITICAL MISMATCH: GRUB UUID wrong!"
+    [[ "$GRUB_LINE" == *"$SWAP_OFFSET"* ]] && echo "✅ GRUB Offset: Match" || echo "🚩 CRITICAL MISMATCH: GRUB Offset wrong!"
 
-    echo "✅ Step 1: Purging Drivers (HID/UVC)..."
-    modprobe -r usbhid uvcvideo 2>/dev/null
-    
-    echo "✅ Step 2: Unbinding USB Controllers..."
-    for xhci in /sys/bus/pci/drivers/xhci_hcd/[0-9]*; do
-        [ -e "$xhci" ] || continue
-        echo "$(basename "$xhci")" > /sys/bus/pci/drivers/xhci_hcd/unbind 2>/dev/null
-    done
-
-    echo "✅ Step 3: Settling kernel (8s)..."
-    sync && udevadm settle && sleep 8
-    
-    echo test_resume > /sys/power/disk
-    
-    if echo disk > /sys/power/state; then
-        echo -e "\n✅ TEST SUCCESSFUL: Hibernation is possible."
+    if [ -f /etc/initramfs-tools/conf.d/resume ]; then
+        # FIXED LOGIC: Extracts everything after RESUME=, then strips quotes
+        INIT_VAL=$(grep "^RESUME=" /etc/initramfs-tools/conf.d/resume | sed 's/^RESUME=//' | tr -d '"' | tr -d "'")
+        
+        # We compare against the format "UUID=your-uuid"
+        if [[ "$INIT_VAL" == "UUID=$PART_UUID" ]]; then
+            echo "✅ Initramfs: Match (UUID=$PART_UUID)"
+        else
+            echo "🚩 CRITICAL MISMATCH: Initramfs resume hook is wrong!"
+            echo "   Currently in file: $INIT_VAL"
+            echo "   Required format:   UUID=$PART_UUID"
+        fi
     else
-        echo -e "\n❌ ERROR: Kernel rejected hibernation. Run with -a for logs."
+        echo "🚩 CRITICAL MISMATCH: Initramfs resume hook MISSING!"
     fi
 
-    # Restore
-    for xhci in /sys/bus/pci/devices/*; do
-        [ -e "$xhci/config" ] || continue
-        echo "$(basename "$xhci")" > /sys/bus/pci/drivers/xhci_hcd/bind 2>/dev/null
-    done
+    echo -e "\n--- Kernel Log Findings ---"
+    if dmesg | grep -qi "Unlikely big volume range"; then
+        echo "🚩 FOUND: Dell Monitor USB Audio Warning. (Use -q to fix this log spam)"
+    fi
+    
+    # Check for AppArmor/Spotify spam found in your previous logs
+    if journalctl -k --since "1 hour ago" | grep -q "apparmor=\"DENIED\".*spotify"; then
+        echo "ℹ️  NOTE: Spotify is being denied USB descriptor access (Harmless AppArmor noise)."
+    fi
+
+    echo -e "\nSummary of last Power/USB events:"
+    journalctl -k | grep -Ei "PM:|usb|xhci|uvc" | tail -n 8
+}
+
+# --- Standard Functions ---
+revert_settings() {
+    echo -e "\n=== Reverting to Previous Configuration ==="
+    [ ! -f "$BACKUP_DIR/grub.bak" ] && echo "❌ No backup found." && exit 1
+    cp "$BACKUP_DIR/grub.bak" /etc/default/grub
+    [ -f "$BACKUP_DIR/resume.bak" ] && cp "$BACKUP_DIR/resume.bak" /etc/initramfs-tools/conf.d/resume || rm -f /etc/initramfs-tools/conf.d/resume
+    update-initramfs -u; update-grub
+    echo "✔ REVERT COMPLETE."
+}
+
+run_test() {
+    modprobe -r usbhid uvcvideo 2>/dev/null
+    sync && udevadm settle && sleep 5
+    echo test_resume > /sys/power/disk
+    echo disk > /sys/power/state
     modprobe usbhid uvcvideo 2>/dev/null
 }
 
-# --- Main Logic ---
 case "$1" in
     -h|--help) show_help; exit 0 ;;
-    -s|--resize) optimize_swap_size ;;
+    -s|--sync) sync_settings ;;
+    -r|--revert) revert_settings ;;
     -t|--test) run_test ;;
-    -i|--install-button) install_hibernate_button ;;
-    -u|--undo-usb) undo_usb ;;
     -a|--analyze) analyze_logs ;;
     -f|--fix-camera) fix_camera_crash ;;
-    "")
-        get_specs
-        echo "=== hibernate-check-fix.sh v6.9.1 ==="
-        echo "Swap Offset: $SWAP_OFFSET"
-        echo "Run with -h to see all options."
+    -q|--quiet-audio) quiet_audio ;;
+    "") get_specs
+        echo "=== hibernate-check-fix.sh v7.5 ==="
+        echo "Partition UUID: $PART_UUID"
+        echo "Swap Offset:    $SWAP_OFFSET"
         ;;
     *) show_help; exit 1 ;;
 esac
