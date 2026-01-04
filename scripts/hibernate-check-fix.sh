@@ -1,9 +1,10 @@
 #!/bin/bash
 # hibernate-check-fix.sh
-# Version 8.1 - Final Polish & Purge Edition
-# Added: Global Cleanup, USB Power Management Hardening, and Scannable UI
+# Version 8.2 - Power Transition Hook Edition
+# Added: Automated module unloading before suspend and reloading after resume
 
 BACKUP_DIR="/etc/hibernate-backups"
+SLEEP_HOOK="/lib/systemd/system-sleep/uvcvideo-hibernate-hook"
 
 show_help() {
     echo "Usage: sudo ./hibernate-check-fix.sh [OPTIONS]"
@@ -14,7 +15,7 @@ show_help() {
     echo "  -i, --install-button Install Hibernate icon to App Menu"
     echo ""
     echo "--- Stability & Quirk Options ---"
-    echo "  -f, --fix-camera     Apply Late-Boot Quirk & Disable USB Autosuspend"
+    echo "  -f, --fix-camera     Apply Late-Boot Quirk & HIBERNATE SLEEP HOOK"
     echo "  -q, --quiet-audio    Silence Dell audio volume range warnings"
     echo "  -p, --persist        Enable persistent logging to survive crashes"
     echo ""
@@ -22,7 +23,7 @@ show_help() {
     echo "  -a, --analyze        Analyze current boot & proof of delay"
     echo "  -c, --crash-check    Analyze previous boot logs (Post-Mortem)"
     echo "  -r, --revert         Roll back to the previous GRUB/Initramfs backup"
-    echo "  --purge              CLEANUP: Remove all quirks, services, and backups"
+    echo "  --purge              CLEANUP: Remove all quirks, hooks, and services"
     echo ""
 }
 
@@ -38,45 +39,37 @@ get_specs() {
     fi
 }
 
-# --- Function: Comprehensive Cleanup ---
-purge_all() {
-    echo -e "\n=== Global Cleanup: Removing All Script Modifications ==="
-    
-    # 1. Remove Camera Quirk & Service
-    systemctl disable --now camera-late-load.service 2>/dev/null
-    rm -f /etc/systemd/system/camera-late-load.service
-    rm -f /etc/modprobe.d/uvcvideo-quirks.conf
-    rm -f /etc/modprobe.d/uvcvideo-blacklist.conf
-    rm -f /etc/udev/rules.d/99-omniforce-power.rules
-    
-    # 2. Remove Audio Quirk
-    rm -f /etc/modprobe.d/dell-audio-quirk.conf
-    
-    # 3. Remove Desktop Integration
-    rm -f /usr/share/applications/hibernate.desktop
-    
-    # 4. Remove Backups
-    rm -rf "$BACKUP_DIR"
-    
-    # 5. Restore Default Logging (Optional: Comment out if you want to keep logs)
-    # sed -i 's/^Storage=persistent/#Storage=auto/' /etc/systemd/journald.conf
-    
-    systemctl daemon-reload
-    echo "✔ All quirks, services, and script backups have been removed."
-    echo "🚩 Note: GRUB and Initramfs settings remain. Use -r to revert those if needed."
-}
-
-# --- Improved Camera Fix (Hardens USB Power) ---
+# --- Function: Comprehensive Camera/Power Quirk ---
 fix_camera_crash() {
-    echo -e "\n=== Hardening USB & Camera Drivers ==="
-    # Quirk: nodrop=1 prevents the driver from discarding frames if the hub is slow
+    echo -e "\n=== Hardening Camera for Hibernate Transitions ==="
+    
+    # 1. Driver Options & Blacklist
     echo "options uvcvideo nodrop=1 timeout=5000" > /etc/modprobe.d/uvcvideo-quirks.conf
     echo "blacklist uvcvideo" > /etc/modprobe.d/uvcvideo-blacklist.conf
     
-    # DISABLE USB Autosuspend globally for the Dell Hub and Camera
-    # This prevents the "Silent Crash" by keeping the USB lane open
+    # 2. USB Power Management (Force 'on')
     echo 'ACTION=="add", SUBSYSTEM=="usb", TEST=="power/control", ATTR{power/control}="on"' > /etc/udev/rules.d/99-omniforce-power.rules
     
+    # 3. Create the Systemd Sleep Hook (Unload on Suspend, Load on Resume)
+    echo "Creating hibernate sleep hook at $SLEEP_HOOK..."
+    cat <<EOF > "$SLEEP_HOOK"
+#!/bin/sh
+# Unload camera driver before hibernate; reload after resume
+case "\$1/\$2" in
+  pre/*)
+    echo "Unloading uvcvideo before \$2..."
+    modprobe -r uvcvideo
+    ;;
+  post/*)
+    echo "Waiting for USB bus to stabilize after \$2..."
+    sleep 10
+    modprobe uvcvideo
+    ;;
+esac
+EOF
+    chmod +x "$SLEEP_HOOK"
+
+    # 4. Late-Boot Service (for standard cold boots)
     cat <<EOF > /etc/systemd/system/camera-late-load.service
 [Unit]
 Description=Load UVC Camera Driver Late
@@ -89,8 +82,26 @@ RemainAfterExit=yes
 [Install]
 WantedBy=multi-user.target
 EOF
-    systemctl daemon-reload; systemctl enable camera-late-load.service
-    echo "✅ Camera and USB Power management hardened."
+    systemctl daemon-reload
+    systemctl enable camera-late-load.service
+    
+    echo "✅ Sleep Hook installed: Camera will unload during hibernation."
+    echo "✅ Late-loader active: Camera will wait 15s after cold boot."
+}
+
+purge_all() {
+    echo -e "\n=== Global Cleanup ==="
+    systemctl disable --now camera-late-load.service 2>/dev/null
+    rm -f /etc/systemd/system/camera-late-load.service
+    rm -f /etc/modprobe.d/uvcvideo-quirks.conf
+    rm -f /etc/modprobe.d/uvcvideo-blacklist.conf
+    rm -f /etc/udev/rules.d/99-omniforce-power.rules
+    rm -f /etc/modprobe.d/dell-audio-quirk.conf
+    rm -f /usr/share/applications/hibernate.desktop
+    rm -f "$SLEEP_HOOK"
+    rm -rf "$BACKUP_DIR"
+    systemctl daemon-reload
+    echo "✔ All quirks, sleep hooks, and services removed."
 }
 
 # --- Standard Logic Blocks ---
@@ -101,7 +112,7 @@ write_swap() {
     swapoff /swap.img 2>/dev/null; rm -f /swap.img
     fallocate -l "${TARGET_GB}G" /swap.img
     chmod 600 /swap.img; mkswap /swap.img; swapon /swap.img
-    echo "✅ Swap created. Now run -s to sync."
+    echo "✅ Swap created."
 }
 
 sync_settings() {
@@ -113,10 +124,9 @@ sync_settings() {
     NEW_PARAMS="quiet splash resume=UUID=$PART_UUID resume_offset=$SWAP_OFFSET"
     sed -i "s|^GRUB_CMDLINE_LINUX_DEFAULT=.*|GRUB_CMDLINE_LINUX_DEFAULT=\"$NEW_PARAMS\"|" /etc/default/grub
     update-initramfs -u -k all; update-grub
-    echo "✅ Sync complete. Reboot to apply."
+    echo "✅ Sync complete."
 }
 
-# --- Main Logic Router ---
 case "$1" in
     -h|--help) show_help ;;
     -w|--write-swap) write_swap ;;
@@ -125,17 +135,16 @@ case "$1" in
         [ ! -f "$BACKUP_DIR/grub.bak" ] && echo "❌ No backup." && exit 1
         cp "$BACKUP_DIR/grub.bak" /etc/default/grub
         [ -f "$BACKUP_DIR/resume.bak" ] && cp "$BACKUP_DIR/resume.bak" /etc/initramfs-tools/conf.d/resume
-        update-initramfs -u; update-grub
-        echo "✅ Reverted." ;;
+        update-initramfs -u; update-grub; echo "✅ Reverted." ;;
     -a|--analyze)
         get_specs
         echo "--- Integrity ---"
-        INIT_VAL=$(grep "^RESUME=" /etc/initramfs-tools/conf.d/resume | sed 's/^RESUME=//' | tr -d '"' | tr -d "'")
+        [ -f /etc/initramfs-tools/conf.d/resume ] && INIT_VAL=$(grep "^RESUME=" /etc/initramfs-tools/conf.d/resume | sed 's/^RESUME=//' | tr -d '"' | tr -d "'")
         [[ "$INIT_VAL" == "UUID=$PART_UUID" ]] && echo "✅ Initramfs: OK" || echo "🚩 Initramfs: MISMATCH"
-        echo "--- Delay Proof ---"
-        systemctl is-active --quiet camera-late-load.service && journalctl -u camera-late-load.service --since "1 hour ago" | grep "Finished" | tail -n 1 ;;
-    -c|--crash-check) 
-        journalctl -b -1 -p 3..0 --no-hostname | tail -n 20 ;;
+        echo "--- Sleep Hook Status ---"
+        [ -f "$SLEEP_HOOK" ] && echo "✅ Hibernate Sleep Hook: INSTALLED" || echo "ℹ️  Hibernate Sleep Hook: MISSING"
+        ;;
+    -c|--crash-check) journalctl -b -1 -p 3..0 --no-hostname | tail -n 20 ;;
     -f|--fix-camera) fix_camera_crash ;;
     -q|--quiet-audio) 
         echo "options snd-usb-audio ignore_ctl_error=1" > /etc/modprobe.d/dell-audio-quirk.conf
@@ -145,9 +154,18 @@ case "$1" in
         sed -i 's/^#Storage=.*/Storage=persistent/' /etc/systemd/journald.conf
         systemctl restart systemd-journald; echo "✅ Persistence enabled." ;;
     -i|--install-button) 
-        # (Desktop file creation logic as before)
-        echo "✅ Button installed." ;;
+        LAUNCHER_PATH="/usr/share/applications/hibernate.desktop"
+        cat <<EOF > "$LAUNCHER_PATH"
+[Desktop Entry]
+Name=Hibernate
+Exec=systemctl hibernate
+Icon=system-suspend-hibernate
+Terminal=false
+Type=Application
+Categories=System;
+EOF
+        chmod +x "$LAUNCHER_PATH"; echo "✅ Button installed." ;;
     --purge) purge_all ;;
-    "") get_specs; echo "=== v8.1 === UUID: $PART_UUID | Offset: $SWAP_OFFSET" ;;
+    "") get_specs; echo "=== v8.2 === UUID: $PART_UUID | Offset: $SWAP_OFFSET" ;;
     *) show_help; exit 1 ;;
 esac
