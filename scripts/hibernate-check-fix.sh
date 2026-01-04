@@ -1,7 +1,7 @@
 #!/bin/bash
 # hibernate-check-fix.sh
-# Version 6.8 - Log Analyzer & Hub Purge Edition
-# Optimized for Dell Wireless Dongle & usb_hub_wq errors
+# Version 6.9.1 - Consolidated Edition
+# Fixes: Hibernation setup, Kernel Log Analysis, and Dell/OmniVision Boot Crashes.
 
 show_help() {
     echo "Usage: sudo ./hibernate-check-fix.sh [OPTIONS]"
@@ -12,7 +12,8 @@ show_help() {
     echo "  -t, --test           Run hibernation test (Forces Hub & Driver Reset)"
     echo "  -i, --install-button Install 'Hibernate' icon to your App Menu"
     echo "  -u, --undo-usb       RESTORE USB wake support (Fixes Dell Keyboard)"
-    echo "  -a, --analyze        Analyze kernel logs for hibernation issues"
+    echo "  -a, --analyze        Analyze kernel logs for hibernation/USB issues"
+    echo "  -f, --fix-camera     Apply Quirk for Dell Monitor/OmniVision Camera crash"
     echo ""
 }
 
@@ -22,7 +23,7 @@ if [[ $EUID -ne 0 ]]; then
    exit 1
 fi
 
-# --- Helper: Gather current system specs ---
+# --- Helper: Gather specs ---
 get_specs() {
     if [ -f /swap.img ]; then
         SWAP_UUID=$(blkid -s UUID -o value /swap.img)
@@ -30,42 +31,56 @@ get_specs() {
     fi
 }
 
+# --- Function: Dell Monitor / OmniVision Quirk ---
+fix_camera_crash() {
+    echo -e "\n=== Applying Dell Monitor & OmniVision Camera Fix ==="
+    
+    # 1. Prevent uvcvideo from loading too early (common crash point)
+    echo "options uvcvideo nodrop=1 timeout=5000" > /etc/modprobe.d/uvcvideo-quirks.conf
+    echo "blacklist uvcvideo" > /etc/modprobe.d/uvcvideo-blacklist.conf
+    
+    # 2. Create a script to load it safely after login
+    cat <<EOF > /usr/local/bin/load-camera-safely.sh
+#!/bin/bash
+# Script created by hibernate-check-fix.sh
+sleep 15
+modprobe uvcvideo
+EOF
+    chmod +x /usr/local/bin/load-camera-safely.sh
+
+    # 3. Disable USB Autosuspend for the Monitor Hub (OmniVision vendor ID: 05a9)
+    echo 'ACTION=="add", SUBSYSTEM=="usb", ATTR{idVendor}=="05a9", ATTR{power/control}="on"' > /etc/udev/rules.d/99-omniforce-power.rules
+    
+    echo "✔ Quirk Applied. Camera driver blacklisted from boot."
+    echo "✔ Created /usr/local/bin/load-camera-safely.sh to load camera manually/later."
+    echo "⚠️  REBOOT REQUIRED to prevent the boot-time crash."
+}
+
 # --- Function: Kernel Log Analyzer ---
 analyze_logs() {
-    echo -e "\n=== Hibernation Kernel Log Analyzer ==="
-    echo "Searching for recent PM (Power Management) events..."
+    echo -e "\n=== Hibernation & Crash Log Analyzer ==="
+    echo "Searching for recent events..."
     echo "----------------------------------------------------"
 
-    # Check for Secure Boot Lockdowns
-    if dmesg | grep -qi "Lockdown:.*hibernation is restricted"; then
-        echo "🚩 ALERT: Kernel is locked down. Secure Boot is likely preventing hibernation."
+    # Check for OmniVision/USB-related crashes
+    if dmesg | grep -qiE "uvcvideo|OmniVision|05a9|usb_hub_wq"; then
+        echo "🚩 FOUND: Camera or USB Hub related kernel events."
     fi
 
-    # Check for freezing failures (Commonly caused by runaway processes or USB)
+    # Check for Secure Boot
+    if dmesg | grep -qi "Lockdown:.*hibernation is restricted"; then
+        echo "🚩 ALERT: Secure Boot is blocking hibernation."
+    fi
+
+    # Check for Freezing tasks failure
     FREEZE_ERR=$(journalctl -k --since "24 hours ago" | grep -i "Freezing of tasks failed")
     if [ ! -z "$FREEZE_ERR" ]; then
-        echo "🚩 ALERT: Task freezing failed recently:"
-        echo "$FREEZE_ERR" | tail -n 3
+        echo "🚩 ALERT: A process or driver blocked hibernation recently:"
+        echo "$FREEZE_ERR" | tail -n 2
     fi
 
-    # Check for Image size issues
-    if dmesg | grep -qi "not enough memory to create binary image"; then
-        echo "🚩 ALERT: Hibernation failed due to insufficient memory/swap space."
-    fi
-
-    # Check for specific USB Hub errors mentioned in script header
-    USB_ERR=$(dmesg | grep -iE "usb_hub_wq|xhci_hcd.*error")
-    if [ ! -z "$USB_ERR" ]; then
-        echo "🚩 ALERT: USB Controller/Hub errors detected:"
-        echo "$USB_ERR" | tail -n 3
-    fi
-
-    echo -e "\nSummary of last hibernation attempt (last 50 PM logs):"
-    journalctl -k | grep -Ei "PM: (hibernation|suspend|image|thawing|freezing)" | tail -n 20
-
-    if [ $? -ne 0 ]; then
-        echo "No hibernation logs found in current boot session."
-    fi
+    echo -e "\nSummary of last Power/USB events (last 15 lines):"
+    journalctl -k | grep -Ei "PM:|usb|xhci|uvc" | tail -n 15
 }
 
 # --- Function: Restore USB Wakeup ---
@@ -77,7 +92,7 @@ undo_usb() {
             echo "$dev" > /proc/acpi/wakeup
         fi
     done
-    echo "✔ RESTORED. USB devices can now wake the system from sleep."
+    echo "✔ RESTORED. USB devices can now wake the system."
 }
 
 # --- Function: Install Desktop Integration ---
@@ -118,6 +133,7 @@ optimize_swap_size() {
     swapoff /swap.img 2>/dev/null; rm -f /swap.img
     fallocate -l "${TARGET_GB}G" /swap.img
     chmod 600 /swap.img; mkswap /swap.img; swapon /swap.img
+    
     get_specs
     
     echo "Updating Initramfs and GRUB..."
@@ -135,45 +151,37 @@ optimize_swap_size() {
 # --- Function: Deep Purge Test Mode ---
 run_test() {
     get_specs
-    
-    # Secure Boot Check
     if command -v mokutil &> /dev/null && mokutil --sb-state | grep -q "enabled"; then
         echo "❌ ERROR: Secure Boot is ENABLED. Linux blocks hibernation in this mode."
         exit 1
     fi
 
-    echo "✅ Step 1: Deep Purging USB Hub Tasks (Module Reload)..."
-    modprobe -r usbhid 2>/dev/null
+    echo "✅ Step 1: Purging Drivers (HID/UVC)..."
+    modprobe -r usbhid uvcvideo 2>/dev/null
     
+    echo "✅ Step 2: Unbinding USB Controllers..."
     for xhci in /sys/bus/pci/drivers/xhci_hcd/[0-9]*; do
         [ -e "$xhci" ] || continue
         echo "$(basename "$xhci")" > /sys/bus/pci/drivers/xhci_hcd/unbind 2>/dev/null
     done
 
-    echo "✅ Step 2: Settling kernel... (Peripherals DISCONNECTED for 8s)"
-    sync && udevadm settle
-    sleep 8
+    echo "✅ Step 3: Settling kernel (8s)..."
+    sync && udevadm settle && sleep 8
     
     echo test_resume > /sys/power/disk
     
     if echo disk > /sys/power/state; then
-        echo -e "\n***************************************************"
-        echo "✅ TEST SUCCESSFUL: Hibernation is working!"
-        echo "The kernel successfully mapped and verified memory."
-        echo "***************************************************"
+        echo -e "\n✅ TEST SUCCESSFUL: Hibernation is possible."
     else
-        echo -e "\n❌ ERROR: Still Busy (usb_hub_wq)."
-        echo "Checking logs for immediate clues..."
-        analyze_logs
+        echo -e "\n❌ ERROR: Kernel rejected hibernation. Run with -a for logs."
     fi
 
-    # RESTORE Drivers
-    echo -e "\n✅ Step 4: Reconnecting USB Controllers and Drivers..."
+    # Restore
     for xhci in /sys/bus/pci/devices/*; do
         [ -e "$xhci/config" ] || continue
         echo "$(basename "$xhci")" > /sys/bus/pci/drivers/xhci_hcd/bind 2>/dev/null
     done
-    modprobe usbhid 2>/dev/null
+    modprobe usbhid uvcvideo 2>/dev/null
 }
 
 # --- Main Logic ---
@@ -184,11 +192,12 @@ case "$1" in
     -i|--install-button) install_hibernate_button ;;
     -u|--undo-usb) undo_usb ;;
     -a|--analyze) analyze_logs ;;
+    -f|--fix-camera) fix_camera_crash ;;
     "")
         get_specs
-        echo "=== Diagnostic Status for hibernate-check-fix.sh ==="
+        echo "=== hibernate-check-fix.sh v6.9.1 ==="
         echo "Swap Offset: $SWAP_OFFSET"
-        cat /proc/acpi/wakeup | grep -E "XHC|EHC|USB"
+        echo "Run with -h to see all options."
         ;;
     *) show_help; exit 1 ;;
 esac
