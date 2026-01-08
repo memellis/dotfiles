@@ -7,20 +7,46 @@ abort() {
 
 install_dotfile() {
     dotfile=${1}
-    if [ -z "${dotfile}" ]
-    then
+    if [ -z "${dotfile}" ]; then
         abort "No dotfile specified to install."
     fi
-    if [ -f ~/${dotfile} ]
-    then 
+    if [ -f ~/${dotfile} ]; then 
         echo -n "Do you want to overwrite existing ${dotfile}? (y/n) "
         read response
-        if [ ! -z "${response}" ] && [ "${response}" = "y" ]
-        then
+        if [ ! -z "${response}" ] && [ "${response}" = "y" ]; then
             cp ${dotfile} ~/${dotfile} 
         fi
     else 
         cp ${dotfile} ~/${dotfile}
+    fi
+}
+
+# --- NEW FUNCTION: Install scripts to local bin ---
+install_scripts() {
+    local script_src_dir="scripts"
+    local bin_dir="$HOME/.local/bin"
+
+    if [ -d "$script_src_dir" ]; then
+        echo "Installing scripts to $bin_dir..."
+        mkdir -p "$bin_dir"
+        
+        for script in "$script_src_dir"/*; do
+            if [ -f "$script" ]; then
+                script_name=$(basename "$script")
+                chmod +x "$script"
+                # Use symlink so updates in the repo reflect immediately
+                ln -sf "$(pwd)/$script" "$bin_dir/$script_name"
+                echo "  Linked $script_name"
+            fi
+        done
+
+        # Ensure bin_dir is in PATH in .bashrc if not already there
+        if ! grep -q "$bin_dir" ~/.bashrc; then
+            echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.bashrc
+            echo "  Added $bin_dir to PATH in .bashrc"
+        fi
+    else
+        echo "No scripts directory found, skipping script installation."
     fi
 }
 
@@ -50,6 +76,8 @@ install_nix() {
     sh <(curl -L https://nixos.org/nix/install) --no-daemon
 }
 
+# --- Execution ---
+
 dotfiles+=".bash_aliases "
 dotfiles+=".bash_logout "
 dotfiles+=".bashrc "
@@ -71,12 +99,13 @@ do
     install_dotfile ${dotfile}
 done
 
+# Run the new script installer
+install_scripts
+
 install_powerline_fonts
-
 install_power_line
-
 install_oh_my_bash
-
 install_ble
-
 install_nix
+
+echo "Installation complete. Restart your shell or run 'source ~/.bashrc'"
