@@ -1,111 +1,123 @@
 #!/bin/bash
 
-abort() {
-    echo "$@"
-    exit 1
-} 
+# Exit on error, undefined vars, and pipe failures
+set -euo pipefail
 
-install_dotfile() {
-    dotfile=${1}
-    if [ -z "${dotfile}" ]; then
-        abort "No dotfile specified to install."
-    fi
-    if [ -f ~/${dotfile} ]; then 
-        echo -n "Do you want to overwrite existing ${dotfile}? (y/n) "
-        read response
-        if [ ! -z "${response}" ] && [ "${response}" = "y" ]; then
-            cp ${dotfile} ~/${dotfile} 
+# --- Configuration ---
+DOTFILES=(
+    ".bash_aliases" ".bash_logout" ".bashrc" ".bashrc_env" 
+    ".bashrc_envvars" ".bashrc_go" ".bashrc_git_env" ".bashrc_rust" 
+    ".bashrc_ssh_agent" ".bashrc_utilities" ".bashrc_wsl" 
+    ".bashrc_wsl_env" ".git_aliases" ".gentoo_aliases"
+)
+
+# --- Helpers ---
+
+abort() { echo -e "\033[31m[ERROR]\033[0m $1"; exit 1; }
+info()  { echo -e "\033[34m[INFO]\033[0m $1"; }
+
+# Check for dependencies like gawk
+check_dep() {
+    for tool in "$@"; do
+        if ! command -v "$tool" &> /dev/null; then
+            info "$tool is required. Attempting to install..."
+            sudo apt-get update && sudo apt-get install -y "$tool" || abort "Could not install $tool"
         fi
-    else 
-        cp ${dotfile} ~/${dotfile}
-    fi
+    done
 }
 
-# --- NEW FUNCTION: Install scripts to local bin ---
+# --- Core Functions ---
+
+install_dotfiles() {
+    info "Installing dotfiles..."
+    for file in "${DOTFILES[@]}"; do
+        if [ -f "$file" ]; then
+            # Using symlinks so updates in repo reflect immediately
+            ln -sf "$(pwd)/$file" "$HOME/$file"
+            echo "  Linked $file"
+        else
+            echo "  Skipping $file (not found in repo)"
+        fi
+    done
+}
+
 install_scripts() {
-    local script_src_dir="scripts"
     local bin_dir="$HOME/.local/bin"
-
-    if [ -d "$script_src_dir" ]; then
-        echo "Installing scripts to $bin_dir..."
-        mkdir -p "$bin_dir"
-        
-        for script in "$script_src_dir"/*; do
-            if [ -f "$script" ]; then
-                script_name=$(basename "$script")
-                chmod +x "$script"
-                # Use symlink so updates in the repo reflect immediately
-                ln -sf "$(pwd)/$script" "$bin_dir/$script_name"
-                echo "  Linked $script_name"
-            fi
+    info "Installing scripts to $bin_dir..."
+    mkdir -p "$bin_dir"
+    
+    if [ -d "scripts" ]; then
+        for script in scripts/*; do
+            [ -f "$script" ] || continue
+            chmod +x "$script"
+            ln -sf "$(pwd)/$script" "$bin_dir/$(basename "$script")"
         done
-
-        # Ensure bin_dir is in PATH in .bashrc if not already there
-        if ! grep -q "$bin_dir" ~/.bashrc; then
-            echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.bashrc
-            echo "  Added $bin_dir to PATH in .bashrc"
+        # Add to PATH if not present
+        if [[ ":$PATH:" != *":$bin_dir:"* ]]; then
+            echo "export PATH=\"$bin_dir:\$PATH\"" >> ~/.bashrc
         fi
-    else
-        echo "No scripts directory found, skipping script installation."
     fi
-}
-
-install_powerline_fonts() {
-    git clone --depth 1 https://github.com/powerline/fonts pl-fonts && cd pl-fonts
-    ./install.sh
-    cd ..
-    rm -fr pl-fonts
-}
-
-install_power_line() {
-    pip install powerline-status
-}
-
-install_oh_my_bash() {
-    bash -c "$(curl -fsSL https://raw.githubusercontent.com/ohmybash/oh-my-bash/master/tools/install.sh)"
 }
 
 install_ble() {
+    info "Installing ble.sh..."
+    check_dep gawk make
+    [ -d "$HOME/.local/share/blesh" ] && { info "ble.sh already exists"; return; }
+    
     git clone --recursive --depth 1 --shallow-submodules https://github.com/akinomyoga/ble.sh.git
     make -C ble.sh install PREFIX=~/.local
-    echo 'source ~/.local/share/blesh/ble.sh' >> ~/.bashrc
-    rm -fr ble.sh
+    rm -rf ble.sh
+    grep -q "blesh/ble.sh" ~/.bashrc || echo '[[ $- == *i* ]] && source ~/.local/share/blesh/ble.sh' >> ~/.bashrc
+}
+
+install_powerline() {
+    info "Installing Powerline..."
+    pip install --user powerline-status
+    git clone --depth 1 https://github.com/powerline/fonts.git pl-fonts
+    ./pl-fonts/install.sh
+    rm -rf pl-fonts
+}
+
+install_oh_my_bash() {
+    info "Installing Oh My Bash..."
+    bash -c "$(curl -fsSL https://raw.githubusercontent.com/ohmybash/oh-my-bash/master/tools/install.sh)" --unattended
 }
 
 install_nix() {
+    info "Installing Nix..."
     sh <(curl -L https://nixos.org/nix/install) --no-daemon
 }
 
-# --- Execution ---
+# --- Selection Logic ---
 
-dotfiles+=".bash_aliases "
-dotfiles+=".bash_logout "
-dotfiles+=".bashrc "
-dotfiles+=".bashrc_env "
-dotfiles+=".bashrc_envvars "
-dotfiles+=".bashrc_go "
-dotfiles+=".bashrc_git_env "
-dotfiles+=".bashrc_rust "
-dotfiles+=".bashrc_ssh_agent "
-dotfiles+=".bashrc_utilities "
-dotfiles+=".bashrc_wsl "
-dotfiles+=".bashrc_wsl_env "
-dotfiles+=".git_aliases "
-dotfiles+=".gentoo_aliases "
+show_usage() {
+    echo "Usage: $0 [all | option1,option2,...]"
+    echo "Options: dotfiles, scripts, ble, powerline, omb, nix"
+    echo "Example: $0 dotfiles,ble,scripts"
+    exit 0
+}
 
-for dotfile in ${dotfiles}
-do
-    echo "Installing ${dotfile} to ~/${dotfile}..."
-    install_dotfile ${dotfile}
+if [ $# -eq 0 ]; then
+    show_usage
+fi
+
+# Split comma-separated string into array
+IFS=',' read -ra ADDR <<< "$1"
+
+for choice in "${ADDR[@]}"; do
+    case "$choice" in
+        all)
+            install_dotfiles; install_scripts; install_ble; install_powerline; install_oh_my_bash; install_nix
+            ;;
+        dotfiles)  install_dotfiles ;;
+        scripts)   install_scripts  ;;
+        ble)       install_ble      ;;
+        powerline) install_powerline ;;
+        omb)       install_oh_my_bash ;;
+        nix)       install_nix      ;;
+        *)         echo "Unknown option: $choice" ;;
+    esac
 done
 
-# Run the new script installer
-install_scripts
-
-install_powerline_fonts
-install_power_line
-install_oh_my_bash
-install_ble
-install_nix
-
-echo "Installation complete. Restart your shell or run 'source ~/.bashrc'"
+info "Done! Restart your shell or run 'source ~/.bashrc'"
+exit 0
