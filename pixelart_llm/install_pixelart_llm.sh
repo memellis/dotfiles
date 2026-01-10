@@ -1,50 +1,57 @@
 #!/bin/bash
-# install_pixelart_llm.sh - Self-Contained Installer
+# install_pixelart_llm.sh - Clean Deployment with URL Redirect
 
-# --- 1. CONFIG ---
+# --- CONFIG ---
+TARGET_BASE="$HOME/.local/share/pixelart_engine"
+WEBUI_DIR="$TARGET_BASE/stable-diffusion-webui"
 WEBUI_REPO="https://github.com/AUTOMATIC1111/stable-diffusion-webui.git"
-WEBUI_DIR="stable-diffusion-webui"  # Now INSIDE pixelart_llm
-VENV_DIR="$WEBUI_DIR/slot_env"
+PARENT_DIR="$(pwd)"
 
-# --- 2. CLONE ENGINE (IF MISSING) ---
+# 1. PREPARE DIRECTORIES
+mkdir -p "$TARGET_BASE"
+git config --global --add safe.directory "*"
+
+# 2. CLONE MAIN ENGINE ONLY
 if [ ! -d "$WEBUI_DIR" ]; then
-    echo "Cloning Stable Diffusion WebUI into pixelart_llm..."
-    # Cloning into a specific folder name
+    echo "Cloning Engine to $WEBUI_DIR..."
     git clone "$WEBUI_REPO" "$WEBUI_DIR"
 fi
 
-# --- 3. DEPLOY CUSTOM LOGIC ---
-echo "Linking pixelart logic into engine..."
-# We use symbolic links (-s) so you only ever have to edit the 
-# files in the main pixelart_llm folder.
-ln -sf "$(pwd)/auto_generate.py" "$WEBUI_DIR/auto_generate.py"
-ln -sf "$(pwd)/prompts.txt" "$WEBUI_DIR/prompts.txt"
+# 3. LINK YOUR LOGIC
+echo "Linking pixelart logic..."
+ln -sf "$PARENT_DIR/auto_generate.py" "$WEBUI_DIR/auto_generate.py"
+ln -sf "$PARENT_DIR/prompts.txt" "$WEBUI_DIR/prompts.txt"
 
-# --- 4. SETUP VIRTUAL ENV ---
-if [ ! -d "$VENV_DIR" ]; then
-    echo "Creating virtual environment..."
-    python3 -m venv "$VENV_DIR"
-    "$VENV_DIR/bin/pip" install requests Pillow psutil --quiet
-fi
+# 4. REDIRECT BROKEN REPO (The Fix)
+# We point the installer to a working fork of the missing repository.
+export STABLE_DIFFUSION_REPO="https://github.com/w-e-w/stablediffusion.git"
 
-# --- 5. HARDWARE DETECTION & LAUNCH ---
+# 5. HARDWARE DETECTION
 VRAM_TOTAL=$(nvidia-smi --query-gpu=memory.total --format=csv,noheader,nounits | head -n 1)
-
+ARGS="--api --skip-torch-cuda-test"
 if [ "$VRAM_TOTAL" -lt 4000 ]; then
-    ARGS="--api --lowvram --opt-split-attention --precision full --no-half --skip-torch-cuda-test"
+    ARGS="$ARGS --lowvram --opt-split-attention --precision full --no-half"
 else
-    ARGS="--api --xformers --precision autocast"
+    ARGS="$ARGS --xformers --precision autocast"
 fi
 
-echo "Starting Stable Diffusion Engine..."
+# 6. LAUNCH
+echo "Starting Engine..."
 cd "$WEBUI_DIR"
 export COMMANDLINE_ARGS="$ARGS"
-# Launch in background
+
+# Ensure venv exists
+if [ ! -d "slot_env" ]; then
+    python3 -m venv slot_env
+    ./slot_env/bin/pip install requests Pillow psutil --quiet
+fi
+
 ./webui.sh > sd_engine.log 2>&1 &
 
-echo "Waiting for API (approx 1-2 mins)..."
+echo "Waiting for API (Monitoring logs)..."
 until curl -s http://127.0.0.1:7860/sdapi/v1/options > /dev/null; do
-    printf "\r[$(date +%H:%M:%S)] Booting..."
+    STATUS=$(tail -n 1 sd_engine.log | cut -c 1-60)
+    printf "\r[$(date +%H:%M:%S)] Status: $STATUS..."
     sleep 5
 done
 
