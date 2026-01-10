@@ -1,0 +1,11 @@
+# Ignore the engine if you decide to put it inside this folder
+stable-diffusion-webui/
+
+# Ignore local python environments
+venv/
+slot_env/
+
+# Ignore outputs if they appear in this folder
+output/
+*.log
+__pycache__/
