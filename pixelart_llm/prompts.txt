@@ -1,44 +1,50 @@
-red ruby heart gemstone
-blue sapphire teardrop gem
-green emerald square crystal
-yellow topaz star jewel
-purple amethyst hexagonal crystal
-orange amber round gemstone
-pink quartz diamond shape
-cyan aquamarine triangle gem
-lucky shiny red number seven
-golden liberty bell with metallic sheen
-triple gold bar bullion stack
-pair of glossy red cherries
-silver horseshoe of luck
-sparkling oversized diamond icon
-royal golden crown with velvet
-clover leaf green emblem
-glowing blue mana potion flask
-bubbling purple poison bottle
-red glass health heart container
-round black bomb with lit fuse
-golden skeleton key with wings
-wooden treasure chest with gold trim
-shining silver shield with blue gem
-rusty iron battle axe icon
-magical lightning bolt wand
-ancient leather spellbook
-burning orange fire orb
-frozen light blue ice cube jewel
-swirling grey tornado cloud
-green oak leaf with dew
-brown mountain stone rune
-yellow sun emblem with rays
-white moon crescent icon
-blue water drop crystal
-pink glazed donut with sprinkles
-wrapped green peppermint candy
-yellow lemon slice icon
-purple bunch of grapes
-red candy cane striped
-chocolate bar with wrapper
-sweet honey pot with drip
-cupcake with blue frosting
-
-
+GEM: red ruby heart gemstone
+GEM: blue sapphire teardrop gem
+GEM: green emerald square crystal
+GEM: yellow topaz star jewel
+GEM: purple amethyst hexagonal crystal
+GEM: orange amber round gemstone
+GEM: pink quartz diamond shape
+GEM: cyan aquamarine triangle gem
+SLOT: lucky shiny red number seven
+SLOT: golden liberty bell with metallic sheen
+SLOT: triple gold bar bullion stack
+SLOT: pair of glossy red cherries
+SLOT: silver horseshoe of luck
+SLOT: sparkling oversized diamond icon
+SLOT: royal golden crown with velvet
+SLOT: clover leaf green emblem
+ITEM: glowing blue mana potion flask
+ITEM: bubbling purple poison bottle
+ITEM: red glass health heart container
+ITEM: round black bomb with lit fuse
+ITEM: golden skeleton key with wings
+ITEM: wooden treasure chest with gold trim
+ITEM: shining silver shield with blue gem
+ITEM: rusty iron battle axe icon
+MAGIC: magical lightning bolt wand
+MAGIC: ancient leather spellbook
+MAGIC: burning orange fire orb
+MAGIC: frozen light blue ice cube jewel
+MAGIC: swirling grey tornado cloud
+ELEMENT: green oak leaf with dew
+ELEMENT: brown mountain stone rune
+ELEMENT: yellow sun emblem with rays
+ELEMENT: white moon crescent icon
+ELEMENT: blue water drop crystal
+FOOD: pink glazed donut with sprinkles
+FOOD: wrapped green peppermint candy
+FOOD: yellow lemon slice icon
+FOOD: purple bunch of grapes
+FOOD: red candy cane striped
+FOOD: chocolate bar with wrapper
+FOOD: sweet honey pot with drip
+FOOD: cupcake with blue frosting
+WORLD: Forest Level portal, Vegas-style wooden slot machine, glowing neon vine lights, forest theme, night time
+WORLD: Lava Level portal, Volcano-themed slot machine, spinning wheel of fire on top, glowing embers, night time
+WORLD: Ice Level portal, Crystal-encrusted slot machine, neon blue frost lights, frozen snowflake symbols, night time
+WORLD: Desert Level portal, Egyptian-themed golden slot machine, neon pyramid accents, spinning scarab wheel, night time
+WORLD: Dungeon Level portal, Gothic iron slot machine, purple neon flickering lights, skull and chains theme, night time
+WORLD: Underwater Level portal, Pearl-encrusted slot machine, glowing cyan neon bubbles, spinning seashell wheel, night time
+WORLD: Sky Level portal, Cloud-themed blue slot machine, neon lightning bolt trim, spinning sun wheel, night time
+WORLD: Candy Level portal, Pink neon candy cane slot machine, glowing sugar swirl lights, spinning donut wheel, night time

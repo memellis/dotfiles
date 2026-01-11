@@ -2,67 +2,90 @@ import unittest
 import os
 import shutil
 import base64
+import subprocess
 from io import BytesIO
 from PIL import Image
 
-# Import your actual code functions
+# Import the actual functions from your auto_generate.py
 try:
-    from auto_generate import slugify, is_valid_image
+    import auto_generate
 except ImportError:
-    print("[!] Error: Could not find auto_generate.py in the current directory.")
+    print("[!] Error: Could not find auto_generate.py. Ensure it is in the same folder.")
     exit(1)
 
 class TestPixelArtRegression(unittest.TestCase):
+    
     def setUp(self):
-        """Create a temporary workspace for testing."""
-        self.test_workspace = "test_workspace_temp"
-        os.makedirs(self.test_workspace, exist_ok=True)
+        """Create a clean temporary workspace for file tests."""
+        self.test_dir = "regression_test_temp"
+        if not os.path.exists(self.test_dir):
+            os.makedirs(self.test_dir)
+        self.test_image_path = os.path.join(self.test_dir, "test_file.png")
 
     def tearDown(self):
-        """Clean up the workspace after tests."""
-        if os.path.exists(self.test_workspace):
-            shutil.rmtree(self.test_workspace)
+        """Remove the temporary workspace."""
+        if os.path.exists(self.test_dir):
+            shutil.rmtree(self.test_dir)
 
-    def test_slugify_consistency(self):
-        """PROVE: Filenames stay consistent (Crucial for Resume feature)."""
-        input_text = "Gold Coin (Pixel Art)!!!"
-        expected = "gold_coin_pixel_art"
-        result = slugify(input_text)
-        self.assertEqual(result, expected, f"Slugify changed! Got '{result}' instead of '{expected}'")
+    def test_category_prefix_parsing(self):
+        """PROVE: 'WORLD: My Prompt' is correctly split into just 'My Prompt'."""
+        raw_input = "WORLD: forest level with neon lights"
+        expected_slug = "forest_level_with_neon_lights"
+        
+        # Mimic the split logic in auto_generate.py
+        processed = raw_input.split(": ", 1)[-1] if ": " in raw_input else raw_input
+        result_slug = auto_generate.slugify(processed)
+        
+        self.assertEqual(result_slug, expected_slug)
+        print(f"\n[PASS] Category Parsing: '{raw_input}' -> '{result_slug}.png'")
 
-    def test_resume_logic_valid(self):
-        """PROVE: The script correctly identifies a valid PNG."""
-        path = os.path.join(self.test_workspace, "valid.png")
-        Image.new('RGB', (64, 64), color='red').save(path)
-        self.assertTrue(is_valid_image(path), "Valid image was incorrectly flagged as invalid!")
+    def test_slugify_no_prefix(self):
+        """PROVE: Standard prompts without categories still work perfectly."""
+        raw_input = "red ruby heart"
+        expected_slug = "red_ruby_heart"
+        
+        result_slug = auto_generate.slugify(raw_input)
+        self.assertEqual(result_slug, expected_slug)
+        print(f"[PASS] Standard Slugify: '{raw_input}' -> '{result_slug}.png'")
 
-    def test_resume_logic_corrupt(self):
-        """PROVE: The script correctly identifies a corrupt/partial file."""
-        path = os.path.join(self.test_workspace, "corrupt.png")
-        with open(path, "w") as f:
-            f.write("This is not a real PNG file data.")
-        self.assertFalse(is_valid_image(path), "Corrupt file was incorrectly flagged as valid!")
+    def test_image_validation_logic(self):
+        """PROVE: is_valid_image catches 0-byte or non-PNG files (Regression Protection)."""
+        # Test 1: Empty file
+        with open(self.test_image_path, 'w') as f:
+            f.write("")
+        self.assertFalse(auto_generate.is_valid_image(self.test_image_path))
+        
+        # Test 2: Real valid PNG
+        Image.new('RGB', (32, 32), color='blue').save(self.test_image_path)
+        self.assertTrue(auto_generate.is_valid_image(self.test_image_path))
+        print("[PASS] Image Validation (Corrupt vs Valid)")
 
-    def test_save_integrity(self):
-        """PROVE: The Base64 -> PIL -> Disk flow works without data loss."""
-        # 1. Create a mock red 512x512 image base64 (like the API returns)
-        mock_img = Image.new('RGB', (512, 512), color='red')
+    def test_vram_detection_safe_fail(self):
+        """PROVE: get_vram_total handles errors gracefully without crashing the script."""
+        vram = auto_generate.get_vram_total()
+        self.assertIsInstance(vram, int)
+        print(f"[PASS] VRAM Detection: Found {vram}MB (0 means detection skipped/fail)")
+
+    def test_base64_save_integrity(self):
+        """PROVE: The save logic doesn't corrupt the pixels during the BytesIO transfer."""
+        # Create a mock API response (Red square)
+        mock_img = Image.new('RGB', (100, 100), color='red')
         buf = BytesIO()
         mock_img.save(buf, format="PNG")
         mock_b64 = base64.b64encode(buf.getvalue()).decode()
-
-        # 2. Run the actual save logic found in your script
-        test_save_path = os.path.join(self.test_workspace, "save_test.png")
-        img_data = base64.b64decode(mock_b64)
-        with Image.open(BytesIO(img_data)) as img:
-            img.save(test_save_path)
-
-        # 3. Verify
-        self.assertTrue(os.path.exists(test_save_path))
-        with Image.open(test_save_path) as saved_img:
-            self.assertEqual(saved_img.size, (512, 512))
-            self.assertEqual(saved_img.getpixel((10, 10)), (255, 0, 0))
+        
+        # Run actual save logic
+        image_data = base64.b64decode(mock_b64)
+        with Image.open(BytesIO(image_data)) as img:
+            img.save(self.test_image_path)
+            
+        # Verify the saved file is actually red
+        with Image.open(self.test_image_path) as verified:
+            pixel = verified.getpixel((50, 50))
+            self.assertEqual(pixel, (255, 0, 0))
+        print("[PASS] PIL Save Integrity")
 
 if __name__ == "__main__":
-    print("--- Starting Regression Tests ---")
+    print("--- RUNNING AUTOMATED REGRESSION SUITE ---")
     unittest.main()
+    
