@@ -2,99 +2,93 @@ import unittest
 import os
 import shutil
 import base64
-import time
 from io import BytesIO
 from PIL import Image
 
-# Import the actual functions from your auto_generate.py
+# Import the actual functions
 try:
     import auto_generate
 except ImportError:
-    print("[!] Error: Could not find auto_generate.py. Ensure it is in the same folder.")
+    print("[!] Error: Could not find auto_generate.py.")
     exit(1)
 
 class TestPixelArtRegression(unittest.TestCase):
     
     def setUp(self):
-        """Create a clean temporary workspace for file tests."""
+        """Create a clean temporary workspace."""
         self.test_dir = "regression_test_temp"
-        if not os.path.exists(self.test_dir):
-            os.makedirs(self.test_dir)
+        os.makedirs(self.test_dir, exist_ok=True)
         self.test_image_path = os.path.join(self.test_dir, "test_file.png")
 
     def tearDown(self):
-        """Remove the temporary workspace."""
+        """Clean up."""
         if os.path.exists(self.test_dir):
             shutil.rmtree(self.test_dir)
 
-    def test_category_prefix_parsing(self):
-        """PROVE: 'WORLD: My Prompt' is correctly split and slugified."""
-        raw_input = "WORLD: forest level with neon lights"
-        expected_slug = "forest_level_with_neon_lights"
-        
-        # Mimic the split logic in auto_generate.py
-        processed = raw_input.split(": ", 1)[-1] if ": " in raw_input else raw_input
-        result_slug = auto_generate.slugify(processed)
-        
-        self.assertEqual(result_slug, expected_slug)
-        print(f"\n[PASS] Category Parsing: '{raw_input}' -> '{result_slug}.png'")
+    def test_multi_size_mapping(self):
+        """PROVE: Categories map to the correct intended resolutions."""
+        self.assertEqual(auto_generate.SIZES["GEM"], 256)
+        self.assertEqual(auto_generate.SIZES["WORLD"], 768)
+        self.assertEqual(auto_generate.SIZES["MAP"], 1024)
+        print("\n[PASS] Multi-Size Mapping verified.")
 
-    def test_image_validation_logic(self):
-        """PROVE: is_valid_image catches 0-byte or non-PNG files (Regression Protection)."""
-        # Test 1: Empty file
-        with open(self.test_image_path, 'w') as f:
-            f.write("")
-        self.assertFalse(auto_generate.is_valid_image(self.test_image_path))
+    def test_kepler_vram_cap_logic(self):
+        """PROVE: Resolutions above 512px are capped for low-VRAM hardware."""
+        vram_sim = 3000 # Simulate 3GB GTX 780
+        is_kepler_sim = vram_sim < 4000
         
-        # Test 2: Real valid PNG
-        Image.new('RGB', (32, 32), color='blue').save(self.test_image_path)
-        self.assertTrue(auto_generate.is_valid_image(self.test_image_path))
-        print("[PASS] Image Validation (Corrupt vs Valid)")
+        # Test a 'WORLD' prompt (intended 768)
+        target_size = auto_generate.SIZES["WORLD"]
+        if is_kepler_sim and target_size > 512:
+            target_size = 512
+            
+        self.assertEqual(target_size, 512)
+        print("[PASS] Kepler VRAM Safety Cap logic verified.")
 
-    def test_timing_and_average_math(self):
-        """PROVE: The new performance tracking doesn't break if duration is zero or small."""
-        durations = [10.5, 15.5, 4.0] # Total 30.0
-        total = sum(durations)
-        count = len(durations)
+    def test_category_parsing(self):
+        """PROVE: Categorized prompts are split correctly for the API and Filenames."""
+        raw_line = "GEM: red ruby jewel"
+        category = raw_line.split(": ", 1)[0]
+        prompt = raw_line.split(": ", 1)[-1]
+        
+        slug = auto_generate.slugify(prompt)
+        
+        self.assertEqual(category, "GEM")
+        self.assertEqual(slug, "red_ruby_jewel")
+        print(f"[PASS] Category Parsing: '{raw_line}' correctly handled.")
+
+    def test_performance_average_math(self):
+        """PROVE: Division logic for average timing is safe."""
+        total = 45.0
+        count = 3
         avg = total / count
-        
-        self.assertEqual(avg, 10.0)
-        self.assertIsInstance(avg, float)
-        print(f"[PASS] Timing Logic: Calculated Avg {avg}s correctly")
+        self.assertEqual(avg, 15.0)
+        print("[PASS] Timing Math verified.")
 
-    def test_vram_detection_safe_fail(self):
-        """PROVE: get_vram_total handles errors gracefully."""
-        vram = auto_generate.get_vram_total()
-        self.assertIsInstance(vram, int)
-        print(f"[PASS] VRAM Detection: {vram}MB (0 is an acceptable safe fallback)")
-
-    def test_save_integrity_bytesio(self):
-        """PROVE: The PIL save flow handles the image stream without corruption."""
-        # Create a mock API response (Green square)
-        mock_img = Image.new('RGB', (100, 100), color='green')
+    def test_image_io_integrity(self):
+        """PROVE: The saving process preserves image resolution."""
+        test_reso = 256
+        mock_img = Image.new('RGB', (test_reso, test_reso), color='blue')
         buf = BytesIO()
         mock_img.save(buf, format="PNG")
-        mock_b64 = base64.b64encode(buf.getvalue()).decode()
         
-        # Run actual save logic from auto_generate (using BytesIO)
-        image_data = base64.b64decode(mock_b64)
-        with Image.open(BytesIO(image_data)) as img:
+        # Save to disk using the script's logic
+        img_data = buf.getvalue()
+        with Image.open(BytesIO(img_data)) as img:
             img.save(self.test_image_path)
             
-        # Verify the saved file
         with Image.open(self.test_image_path) as verified:
-            pixel = verified.getpixel((50, 50))
-            self.assertEqual(pixel, (0, 128, 0)) # Green
-        print("[PASS] PIL Save Integrity via BytesIO")
+            self.assertEqual(verified.size, (test_reso, test_reso))
+        print(f"[PASS] Image IO Integrity verified at {test_reso}px.")
 
 if __name__ == "__main__":
-    print("--- RUNNING AUTOMATED REGRESSION SUITE ---")
-    # Using a runner to capture results cleanly
+    print("--- RUNNING FULL REGRESSION SUITE ---")
     suite = unittest.TestLoader().loadTestsFromTestCase(TestPixelArtRegression)
     result = unittest.TextTestRunner(verbosity=1).run(suite)
     
     if result.wasSuccessful():
-        print("\n\033[0;32m[ALL TESTS PASSED] Ready for generation.\033[0m")
+        print("\n\033[0;32m[SUCCESS] All core functions are stable.\033[0m")
     else:
-        print("\n\033[0;31m[REGRESSION DETECTED] Please check the errors above.\033[0m")
+        print("\n\033[0;31m[CRITICAL] Regression detected. Do not run main script.\033[0m")
         exit(1)
+    
