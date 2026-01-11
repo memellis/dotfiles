@@ -1,13 +1,28 @@
 #!/bin/bash
 # install_pixelart_llm.sh - Kepler GPU (GTX 780) & Ubuntu 24.04 STABLE
-# Features: Progress Capture + Middleware Watchdog + Environment Audit
+# Features: Progress Capture + Health Audit + Graceful Cleanup
 
 TARGET_BASE="$HOME/.local/share/pixelart_engine"
 WEBUI_DIR="$TARGET_BASE/stable-diffusion-webui"
 PARENT_DIR="$(pwd)"
 LOG_FILE="$WEBUI_DIR/sd_engine.log"
 
-echo "--- PixelArt LLM Engine Setup (Driver 470 / GTX 780 Edition) ---"
+echo "--- PixelArt LLM Engine Setup (GTX 780 Edition) ---"
+
+# --- CTRL+C HANDLING ---
+cleanup() {
+    echo -e "\n\n[!] Interrupt detected. Shutting down engine (PID: $ENGINE_PID)..."
+    if [ ! -z "$ENGINE_PID" ]; then
+        kill $ENGINE_PID 2>/dev/null
+    fi
+    # Ensure the port is actually freed
+    fuser -k 7860/tcp 2>/dev/null
+    echo "[*] Cleanup complete. Exiting."
+    exit 0
+}
+
+# Trap SIGINT (Ctrl+C) and SIGTERM
+trap cleanup SIGINT SIGTERM
 
 # 1. SYSTEM SETUP
 if ! command -v python3.10 &> /dev/null; then
@@ -25,7 +40,7 @@ fi
 ln -sf "$PARENT_DIR/auto_generate.py" "$WEBUI_DIR/auto_generate.py"
 ln -sf "$PARENT_DIR/prompts.txt" "$WEBUI_DIR/prompts.txt"
 
-# 3. VIRTUAL ENVIRONMENT REBUILD
+# 3. VIRTUAL ENVIRONMENT
 cd "$WEBUI_DIR"
 fuser -k 7860/tcp 2>/dev/null 
 
@@ -33,35 +48,25 @@ if [ ! -d "venv" ]; then
     echo "[*] Building Fresh 3.10 Virtual Environment..."
     python3.10 -m venv venv
     ./venv/bin/pip install --upgrade pip
-    ./venv/bin/pip install torch==2.1.2+cu118 torchvision==0.16.2+cu118 --extra-index-url https://download.pytorch.org/whl/cu118
+    ./venv/bin/pip install torch==2.1.2+cu118 torchvision==0.16.2+cu118 Pillow requests --extra-index-url https://download.pytorch.org/whl/cu118
     ./venv/bin/pip install fastapi==0.94.1 starlette==0.26.1 anyio==3.7.1
 fi
 
-# 4. ENVIRONMENT AUDIT (The Health Check)
+# 4. ENVIRONMENT AUDIT
 echo "[*] Auditing Environment for Kepler Compatibility..."
 AUDIT_RESULT=$(./venv/bin/python3 <<EOF
-import torch, fastapi, anyio, sys
+import torch, sys
 try:
-    cuda_ok = torch.cuda.is_available()
-    torch_v = torch.__version__
-    fast_v = fastapi.__version__
-    # Check for problematic versions
-    if "cu118" not in torch_v: print(f"FAIL: Wrong Torch version ({torch_v})"); sys.exit(1)
-    if not cuda_ok: print("FAIL: GPU not visible to Torch"); sys.exit(1)
-    print(f"PASS: Torch {torch_v} | FastAPI {fast_v} | CUDA Visible")
-except Exception as e:
-    print(f"FAIL: {str(e)}")
-    sys.exit(1)
+    if "cu118" not in torch.__version__: sys.exit(1)
+    if not torch.cuda.is_available(): sys.exit(1)
+    print("PASS")
+except: sys.exit(1)
 EOF
 )
 
-if [[ $AUDIT_RESULT == FAIL* ]]; then
-    echo -e "\033[1;31m[!] Environment Audit Failed: $AUDIT_RESULT\033[0m"
-    echo "[*] Deleting broken venv and restarting..."
-    rm -rf venv/
-    exec "$0" # Restart the script to trigger a fresh rebuild
-else
-    echo -e "\033[1;32m$AUDIT_RESULT\033[0m"
+if [[ "$AUDIT_RESULT" != "PASS" ]]; then
+    echo -e "\033[1;31m[!] Audit Failed. Rebuilding venv...\033[0m"
+    rm -rf venv/ && exec "$0"
 fi
 
 # 5. CONFIGURE & LAUNCH
@@ -69,24 +74,29 @@ export COMMANDLINE_ARGS="--api --precision full --no-half --use-cpu all --skip-t
 export STABLE_DIFFUSION_REPO="https://github.com/w-e-w/stablediffusion.git"
 export PYTHONUNBUFFERED=1
 
-echo "Starting Engine (Monitoring Progress)..."
+echo "Starting Engine (Ctrl+C to stop everything)..."
 > "$LOG_FILE"
 stdbuf -oL -eL ./venv/bin/python3 -u launch.py > "$LOG_FILE" 2>&1 &
 ENGINE_PID=$!
 
+# 6. MONITORING LOOP
 while true; do
     if curl -s http://127.0.0.1:7860/sdapi/v1/options > /dev/null; then
         echo -e "\n[✓] API is LIVE."
         break
     fi
-    if tail -n 10 "$LOG_FILE" | grep -qEi "RuntimeError: Cannot add middleware|anyio.WouldBlock"; then
-        echo -e "\n[!] Middleware Error. Re-patching..."
-        ./venv/bin/pip install fastapi==0.94.1 starlette==0.26.1
-        kill $ENGINE_PID; exit 1
+    
+    # Check for startup crashes
+    if tail -n 5 "$LOG_FILE" | grep -qEi "RuntimeError|anyio.WouldBlock"; then
+        echo -e "\n[!] Engine Crash Detected."
+        cleanup
     fi
+
+    # Progress bar capture
     STATUS=$(tail -c 1000 "$LOG_FILE" | tr '\r' '\n' | tail -n 1 | cut -c 1-80)
     printf "\r\033[K[$(date +%H:%M:%S)] $STATUS"
     sleep 2
 done
 
+# 7. HANDOVER
 ./venv/bin/python3 auto_generate.py --process
