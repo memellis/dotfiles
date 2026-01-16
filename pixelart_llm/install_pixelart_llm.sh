@@ -1,28 +1,33 @@
 #!/bin/bash
 # install_pixelart_llm.sh - Kepler GPU (GTX 780) & Ubuntu 24.04 STABLE
+# Strategy: Legacy Torch 1.13.1 + FP32 Force + Reliable Window Cleanup
 
 TARGET_BASE="$HOME/.local/share/pixelart_engine"
 WEBUI_DIR="$TARGET_BASE/stable-diffusion-webui"
 PARENT_DIR="$(pwd)"
 LOG_FILE="$WEBUI_DIR/sd_engine.log"
+LOG_TITLE="SD_ENGINE_LOGS"
 
 # --- AUTO-HEAL ON START ---
 echo "[*] Cleaning up old sessions..."
 fuser -k 7860/tcp 2>/dev/null
 pkill -f "launch.py" 2>/dev/null
-rm -f "$WEBUI_DIR/.git/index.lock" 2>/dev/null
+pkill -f "$LOG_TITLE" 2>/dev/null # Clear any orphaned log windows
 
-echo "--- PixelArt LLM Engine Setup (GTX 780 Edition) ---"
+echo "--- PixelArt LLM Engine Setup (GTX 780 GPU Edition) ---"
 
 cleanup() {
     echo -e "\n\n[!] Interrupt detected. Cleaning up..."
+    
+    # 1. Kill the Stable Diffusion Engine
     if [ ! -z "$ENGINE_PID" ]; then kill $ENGINE_PID 2>/dev/null; fi
-    if [ ! -z "$LOG_TERM_PID" ]; then 
-        pkill -P $LOG_TERM_PID 2>/dev/null
-        kill $LOG_TERM_PID 2>/dev/null
-    fi
+    
+    # 2. Aggressive kill for the log window using process name match
+    pkill -9 -f "$LOG_TITLE" 2>/dev/null
+    
+    # 3. Final port cleanup
     fuser -k 7860/tcp 2>/dev/null
-    echo "[*] Cleanup complete."
+    echo "[*] Cleanup complete. Desktop cleared."
     exit 0
 }
 
@@ -44,65 +49,76 @@ ln -sf "$PARENT_DIR/auto_generate.py" "$WEBUI_DIR/auto_generate.py"
 ln -sf "$PARENT_DIR/prompts.txt" "$WEBUI_DIR/prompts.txt"
 ln -sf "$PARENT_DIR/pixel_engine_controller.py" "$WEBUI_DIR/pixel_engine_controller.py"
 
-# 3. VIRTUAL ENVIRONMENT & MANDATORY VERSIONS
+# 3. VIRTUAL ENVIRONMENT & LEGACY TORCH (Kepler Support)
 cd "$WEBUI_DIR"
 if [ ! -d "venv" ]; then
     python3.10 -m venv venv
     ./venv/bin/pip install --upgrade pip
 fi
 
-# CRITICAL LOCK: API Compatibility
-./venv/bin/pip install torch==2.1.2+cu118 torchvision==0.16.2+cu118 --extra-index-url https://download.pytorch.org/whl/cu118
+# We use Torch 1.13.1 because 2.x+ lacks the Sm35 kernels for GTX 780
+echo "[*] Enforcing Kepler-Compatible Torch 1.13.1 + CUDA 11.7..."
+./venv/bin/pip install torch==1.13.1+cu117 torchvision==0.14.1+cu117 --extra-index-url https://download.pytorch.org/whl/cu117
 ./venv/bin/pip install anyio==3.7.1 httpcore==0.15.0 fastapi==0.90.1 starlette==0.23.1 --force-reinstall
 
-# 4. ENVIRONMENT AUDIT
-echo "[*] Auditing Kepler Compatibility..."
+# 4. HARDWARE & DRIVER AUDIT
+echo "[*] Auditing Nvidia Driver & CUDA Kernels..."
+if ! command -v nvidia-smi &> /dev/null; then
+    echo "[!] nvidia-smi not found. Drivers missing."; exit 1
+fi
+
+DRIVER_VER=$(nvidia-smi --query-gpu=driver_version --format=csv,noheader,nounits | cut -d'.' -f1)
+if [ "$DRIVER_VER" -lt 450 ]; then
+    echo "[!] Driver $DRIVER_VER too old for CUDA 11.7. Needs 450+."; exit 1
+fi
+
 AUDIT_RESULT=$(./venv/bin/python3 <<EOF
 import torch, sys
+if not torch.cuda.is_available(): sys.exit(1)
 try:
-    if "cu118" not in torch.__version__ or not torch.cuda.is_available(): sys.exit(1)
-    print("PASS")
+    # Physical execution test to verify kernel presence
+    x = torch.ones(1).cuda()
+    print(f"PASS: {torch.cuda.get_device_name(0)}")
 except: sys.exit(1)
 EOF
 )
 
-if [[ "$AUDIT_RESULT" != "PASS" ]]; then
-    echo "[!] Audit Failed. Rebuilding venv..."
-    rm -rf venv/ && exec "$0"
+if [[ "$AUDIT_RESULT" != "PASS"* ]]; then
+    echo -e "\033[1;31m[!] GPU AUDIT FAILED. Kernel image missing or incompatible.\033[0m"
+    exit 1
+else
+    echo "[✓] GPU Confirmed: $AUDIT_RESULT"
 fi
 
-# 5. CONFIGURE & LAUNCH
-export COMMANDLINE_ARGS="--api --precision full --no-half --use-cpu all --skip-torch-cuda-test --lowvram --disable-nan-check --skip-prepare-environment"
+# 5. CONFIGURE & LAUNCH (Enforced GPU Mode)
+# --precision full & --no-half: Kepler cannot do FP16 math
+export COMMANDLINE_ARGS="--api --precision full --no-half --opt-split-attention --lowvram --skip-prepare-environment --disable-safe-unpickle"
 export STABLE_DIFFUSION_REPO="https://github.com/w-e-w/stablediffusion.git"
 export PYTHONUNBUFFERED=1
 
 echo "[*] Initializing Log File..."
 > "$LOG_FILE"
 
-# --- SPAWN LOG WINDOW (D-BUS & CLEAN ROOM FIX) ---
+# --- SPAWN LOG WINDOW (RELIABLE CLEANUP VERSION) ---
 if command -v gnome-terminal &> /dev/null; then
-    # We pass the D-Bus session address so gnome-terminal can connect to the Factory
-    env -i HOME="$HOME" \
-           DISPLAY="$DISPLAY" \
-           XAUTHORITY="$XAUTHORITY" \
-           DBUS_SESSION_BUS_ADDRESS="$DBUS_SESSION_BUS_ADDRESS" \
-    gnome-terminal --title="SD_ENGINE_LOGS" -- bash -c "tail -f $LOG_FILE" &
-    LOG_TERM_PID=$!
+    # 'exec -a' renames the process in the process list, making pkill reliable
+    env -i HOME="$HOME" DISPLAY="$DISPLAY" XAUTHORITY="$XAUTHORITY" DBUS_SESSION_BUS_ADDRESS="$DBUS_SESSION_BUS_ADDRESS" \
+    gnome-terminal --title="$LOG_TITLE" -- bash -c "exec -a $LOG_TITLE tail -f $LOG_FILE" &
 fi
 
-echo "Starting Engine (Ctrl+C to stop all)..."
+echo "Starting GPU Engine (Kepler Mode)..."
 stdbuf -oL -eL ./venv/bin/python3 -u launch.py > "$LOG_FILE" 2>&1 &
 ENGINE_PID=$!
 
 # 6. MONITORING LOOP
 while true; do
     if curl -s http://127.0.0.1:7860/sdapi/v1/options > /dev/null; then
-        echo -e "\n[✓] API is LIVE."
+        echo -e "\n[✓] GPU Engine is LIVE."
         break
     fi
     
     if tail -n 10 "$LOG_FILE" | grep -qEi "RuntimeError: Cannot add middleware"; then
-        echo -e "\n[!] Middleware Crash. Restarting..."
+        echo -e "\n[!] API Middleware Crash. Restarting..."
         cleanup
     fi
 
