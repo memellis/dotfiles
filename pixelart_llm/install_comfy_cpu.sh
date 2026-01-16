@@ -1,57 +1,70 @@
 #!/bin/bash
-# install_comfy_cpu.sh - Automated ComfyUI Setup for CPU & Shared Forge Models
+# setup_hibernation_fix.sh - Enhanced Cleanup & Hibernation Prep
 
 BASE_DIR="$HOME/PixelArtStudio"
-FORGE_DIR="$BASE_DIR/stable-diffusion-webui-forge"
-COMFY_DIR="$BASE_DIR/ComfyUI"
+BIN_DIR="$HOME/.local/bin"
 
-echo "--- 🚀 Starting ComfyUI CPU Installation ---"
+echo "--- 🛠️ Enhancing pixelart_gen with Hibernation Logic ---"
 
-# 1. Clone the repository
-if [ ! -d "$COMFY_DIR" ]; then
-    cd "$BASE_DIR"
-    git clone https://github.com/comfyanonymous/ComfyUI.git
-else
-    echo "✅ ComfyUI directory already exists. Skipping clone."
-fi
-
-# 2. Setup Virtual Environment
-cd "$COMFY_DIR"
-python3 -m venv venv
-source venv/bin/activate
-
-# 3. Install CPU-optimized Torch and Requirements
-echo "--- 🛠️ Installing CPU-optimized dependencies (this may take a few mins) ---"
-pip install --upgrade pip
-pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cpu
-pip install -r requirements.txt
-
-# 4. Configure Shared Models with Forge
-echo "--- 🔗 Linking Forge models to ComfyUI ---"
-cat <<EOF > "$COMFY_DIR/extra_model_paths.yaml"
-a111:
-    base_path: $FORGE_DIR
-    checkpoints: models/Stable-diffusion
-    configs: models/Stable-diffusion
-    vae: models/VAE
-    loras: models/Lora
-    upscale_models: models/ESRGAN
-    embeddings: embeddings
-    controlnet: models/ControlNet
-EOF
-
-# 5. Create the Launcher
-echo "--- 🖥️ Creating run_comfy.sh launcher ---"
-cat <<EOF > "$BASE_DIR/run_comfy.sh"
+cat <<EOF > "$BIN_DIR/pixelart_gen"
 #!/bin/bash
-cd "$COMFY_DIR"
-source venv/bin/activate
-# Running in CPU mode to prevent crashes on non-GPU systems
-python3 main.py --cpu --port 8188
+
+# Port used by Forge (7860) and ComfyUI (8188)
+FORGE_PORT=7860
+COMFY_PORT=8188
+
+cleanup_handler() {
+    echo -e "\n[🛑 SHUTDOWN] Ctrl+C Detected. Preparing for hibernation..."
+    
+    # 1. Kill the local python generator
+    pkill -f "pixelart_gen.py"
+    
+    # 2. Kill Stable Diffusion Forge Server (find by port)
+    FORGE_PID=\$(lsof -t -i:\$FORGE_PORT)
+    if [ ! -z "\$FORGE_PID" ]; then
+        echo "[🧹] Killing Forge Server (PID: \$FORGE_PID)..."
+        kill -15 \$FORGE_PID 2>/dev/null
+        sleep 2
+        kill -9 \$FORGE_PID 2>/dev/null
+    fi
+
+    # 3. Kill ComfyUI Server (find by port)
+    COMFY_PID=\$(lsof -t -i:\$COMFY_PORT)
+    if [ ! -z "\$COMFY_PID" ]; then
+        echo "[🧹] Killing ComfyUI Server (PID: \$COMFY_PID)..."
+        kill -15 \$COMFY_PID 2>/dev/null
+        sleep 2
+        kill -9 \$COMFY_PID 2>/dev/null
+    fi
+
+    # 4. Final sweep for any lingering 'python' processes in PixelArtStudio
+    echo "[🧹] Final process sweep..."
+    pkill -f "stable-diffusion-webui-forge"
+    pkill -f "ComfyUI/main.py"
+
+    # 5. The NVIDIA UVM Reset
+    echo "[⚡] Resetting NVIDIA UVM module..."
+    # This requires sudo. It unloads the module to clear GPU memory handles.
+    sudo modprobe -r nvidia_uvm && sudo modprobe nvidia_uvm
+    
+    if [ \$? -eq 0 ]; then
+        echo "✅ NVIDIA reset successful. System is safe to hibernate."
+    else
+        echo "⚠️ NVIDIA module busy. Ensure all browser tabs are closed."
+    fi
+    
+    exit 0
+}
+
+# Trap the Ctrl+C signal
+trap cleanup_handler SIGINT
+
+echo "🚀 Starting Pixel Art Generation..."
+echo "💡 Press Ctrl+C at any time to stop and prep for hibernation."
+
+# Run the generator
+python3 "$BASE_DIR/pixelart_gen.py"
 EOF
 
-chmod +x "$BASE_DIR/run_comfy.sh"
-
-echo "--- ✅ Setup Complete! ---"
-echo "To start ComfyUI, run: ./run_comfy.sh"
-echo "Then open your browser to: http://127.0.0.1:8188"
+chmod +x "$BIN_DIR/pixelart_gen"
+echo "✅ Enhanced 'pixelart_gen' is ready."
