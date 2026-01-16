@@ -4,33 +4,44 @@ from PIL import Image, ImageEnhance, ImageOps, ImageFilter
 # Preference remembered: Default to True
 PROCESS_ASSETS = True
 
-def apply_pixel_perfection(img, internal_res=48, final_res=512):
+# Internal "Pixel" resolutions for different categories
+# Smaller numbers = Chunkier, more "retro" pixels
+CHUNK_S_MAP = {
+    "GEM": 32,      # Very chunky/sharp
+    "ITEM": 48,     # Standard detail
+    "SLOT": 64,     # High detail icons
+    "WORLD": 128,   # Environment textures
+    "MAP": 160,     # Map details
+    "DEFAULT": 48
+}
+
+def apply_pixel_perfection(img, category="DEFAULT", final_res=512):
     """
-    Universal cleanup for any object:
-    1. Median Filter: Automatically deletes 'salt and pepper' noise and glitch lines.
-    2. Posterize: Forces colors into solid blocks (essential for game assets).
-    3. Grid-Snap: Downscales to 48px to create the 'Pixel Art' look.
-    4. Quantize: Forces a strict 16-color limit for a clean palette.
+    Universal cleanup with category-aware grid snapping.
     """
     img = img.convert("RGB")
     
-    # Kill hardware noise (stray pixels)
+    # 1. Kill hardware noise (stray pixels)
     img = img.filter(ImageFilter.MedianFilter(size=3))
     
-    # Flatten muddy gradients into distinct color steps
+    # 2. Flatten muddy gradients
     img = ImageOps.posterize(img, 3)
     
-    # Sharpen the contrast for clear object silhouettes
+    # 3. Sharpen silhouettes
     img = ImageEnhance.Contrast(img).enhance(1.4)
+    
+    # 4. Category-Aware Grid-Snap
+    # Fetch the internal resolution based on the category passed from auto_generate.py
+    internal_res = CHUNK_S_MAP.get(category, CHUNK_S_MAP["DEFAULT"])
     
     # Scale down to chunky grid (Nearest Neighbor keeps edges sharp)
     img = img.resize((internal_res, internal_res), resample=Image.NEAREST)
     
-    # Lock to 16 colors
+    # 5. Lock to 16 colors (Game-ready palette)
     img = img.quantize(colors=16, method=Image.MAXCOVERAGE).convert("RGBA")
     
-    # Upscale back to viewable size
+    # 6. Upscale back to viewable size
     return img.resize((final_res, final_res), resample=Image.NEAREST)
 
 if __name__ == "__main__":
-    print("[✓] Controller: General Pixel-Logic Active.")
+    print("[✓] Controller: Category-Aware Pixel-Logic Active.")

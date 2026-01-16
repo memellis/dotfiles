@@ -1,5 +1,6 @@
 #!/bin/bash
 # install_pixelart_llm.sh - Kepler GPU (GTX 780) & Ubuntu 24.04 STABLE
+# Features: Progress Capture + Dependency Guard + Health Audit
 
 TARGET_BASE="$HOME/.local/share/pixelart_engine"
 WEBUI_DIR="$TARGET_BASE/stable-diffusion-webui"
@@ -37,22 +38,23 @@ if [ ! -d "$WEBUI_DIR" ]; then
 fi
 ln -sf "$PARENT_DIR/auto_generate.py" "$WEBUI_DIR/auto_generate.py"
 ln -sf "$PARENT_DIR/prompts.txt" "$WEBUI_DIR/prompts.txt"
+ln -sf "$PARENT_DIR/pixel_engine_controller.py" "$WEBUI_DIR/pixel_engine_controller.py"
 
-# 3. VIRTUAL ENVIRONMENT (With Middleware Conflict Fix)
+# 3. VIRTUAL ENVIRONMENT & MANDATORY VERSIONS
 cd "$WEBUI_DIR"
-if [ ! -f "venv/bin/activate" ]; then
-    echo "[!] Venv missing or corrupted. Rebuilding..."
-    rm -rf venv/
+if [ ! -d "venv" ]; then
+    echo "[*] Building Fresh 3.10 Virtual Environment..."
     python3.10 -m venv venv
     ./venv/bin/pip install --upgrade pip
-    ./venv/bin/pip install torch==2.1.2+cu118 torchvision==0.16.2+cu118 Pillow requests --extra-index-url https://download.pytorch.org/whl/cu118
 fi
 
-# FORCE MIDDLEWARE FIX: Prevents "RuntimeError: Cannot add middleware"
-echo "[*] Ensuring API compatibility (FastAPI/Starlette)..."
-./venv/bin/pip install fastapi==0.90.1 starlette==0.23.1 --force-reinstall
+# CRITICAL: We force these versions EVERY launch to prevent "RuntimeError"
+echo "[*] Enforcing API Compatibility Layers..."
+./venv/bin/pip install torch==2.1.2+cu118 torchvision==0.16.2+cu118 --extra-index-url https://download.pytorch.org/whl/cu118
+./venv/bin/pip install anyio==3.7.1 httpcore==0.15.0 fastapi==0.90.1 starlette==0.23.1 --force-reinstall
 
 # 4. ENVIRONMENT AUDIT
+echo "[*] Auditing Environment for Kepler Compatibility..."
 AUDIT_RESULT=$(./venv/bin/python3 <<EOF
 import torch, sys
 try:
@@ -63,7 +65,7 @@ EOF
 )
 
 if [[ "$AUDIT_RESULT" != "PASS" ]]; then
-    echo "[!] GPU Audit Failed. Attempting venv repair..."
+    echo -e "\033[1;31m[!] Audit Failed. Rebuilding venv...\033[0m"
     rm -rf venv/ && exec "$0"
 fi
 
@@ -72,7 +74,7 @@ export COMMANDLINE_ARGS="--api --precision full --no-half --use-cpu all --skip-t
 export STABLE_DIFFUSION_REPO="https://github.com/w-e-w/stablediffusion.git"
 export PYTHONUNBUFFERED=1
 
-echo "Starting Engine..."
+echo "Starting Engine (Ctrl+C to stop everything)..."
 > "$LOG_FILE"
 stdbuf -oL -eL ./venv/bin/python3 -u launch.py > "$LOG_FILE" 2>&1 &
 ENGINE_PID=$!
@@ -83,16 +85,21 @@ while true; do
         echo -e "\n[✓] API is LIVE."
         break
     fi
-    # Check for the specific middleware error in the logs
-    if tail -n 20 "$LOG_FILE" | grep -q "RuntimeError: Cannot add middleware"; then
-        echo "[!] Middleware crash detected. Applying force-patch..."
-        ./venv/bin/pip install fastapi==0.90.1 starlette==0.23.1 --force-reinstall
+    
+    # Check for startup crashes
+    if tail -n 10 "$LOG_FILE" | grep -qEi "RuntimeError: Cannot add middleware|anyio.WouldBlock"; then
+        echo -e "\n[!] API Middleware Crash Detected. Restarting..."
         kill $ENGINE_PID 2>/dev/null
-        exec "$0" # Restart the script
+        # Force reinstall again before looping
+        ./venv/bin/pip install anyio==3.7.1 fastapi==0.90.1 starlette==0.23.1 --force-reinstall
+        exec "$0"
     fi
+
+    # Progress bar capture
     STATUS=$(tail -c 1000 "$LOG_FILE" | tr '\r' '\n' | tail -n 1 | cut -c 1-80)
     printf "\r\033[K[$(date +%H:%M:%S)] %s" "$STATUS"
     sleep 2
 done
 
+# 7. HANDOVER
 ./venv/bin/python3 auto_generate.py
