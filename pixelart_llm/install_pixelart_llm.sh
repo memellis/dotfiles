@@ -1,6 +1,5 @@
 #!/bin/bash
 # install_pixelart_llm.sh - Kepler GPU (GTX 780) & Ubuntu 24.04 STABLE
-# Features: Progress Capture + Dependency Guard + Health Audit
 
 TARGET_BASE="$HOME/.local/share/pixelart_engine"
 WEBUI_DIR="$TARGET_BASE/stable-diffusion-webui"
@@ -18,7 +17,12 @@ echo "--- PixelArt LLM Engine Setup (GTX 780 Edition) ---"
 cleanup() {
     echo -e "\n\n[!] Interrupt detected. Cleaning up..."
     if [ ! -z "$ENGINE_PID" ]; then kill $ENGINE_PID 2>/dev/null; fi
+    if [ ! -z "$LOG_TERM_PID" ]; then 
+        pkill -P $LOG_TERM_PID 2>/dev/null
+        kill $LOG_TERM_PID 2>/dev/null
+    fi
     fuser -k 7860/tcp 2>/dev/null
+    echo "[*] Cleanup complete."
     exit 0
 }
 
@@ -43,18 +47,16 @@ ln -sf "$PARENT_DIR/pixel_engine_controller.py" "$WEBUI_DIR/pixel_engine_control
 # 3. VIRTUAL ENVIRONMENT & MANDATORY VERSIONS
 cd "$WEBUI_DIR"
 if [ ! -d "venv" ]; then
-    echo "[*] Building Fresh 3.10 Virtual Environment..."
     python3.10 -m venv venv
     ./venv/bin/pip install --upgrade pip
 fi
 
-# CRITICAL LOCK: These specific versions must exist for the API to function
-echo "[*] Enforcing API Compatibility Layers..."
+# CRITICAL LOCK: API Compatibility
 ./venv/bin/pip install torch==2.1.2+cu118 torchvision==0.16.2+cu118 --extra-index-url https://download.pytorch.org/whl/cu118
 ./venv/bin/pip install anyio==3.7.1 httpcore==0.15.0 fastapi==0.90.1 starlette==0.23.1 --force-reinstall
 
 # 4. ENVIRONMENT AUDIT
-echo "[*] Auditing Environment for Kepler Compatibility..."
+echo "[*] Auditing Kepler Compatibility..."
 AUDIT_RESULT=$(./venv/bin/python3 <<EOF
 import torch, sys
 try:
@@ -65,18 +67,30 @@ EOF
 )
 
 if [[ "$AUDIT_RESULT" != "PASS" ]]; then
-    echo -e "\033[1;31m[!] Audit Failed. Rebuilding venv...\033[0m"
+    echo "[!] Audit Failed. Rebuilding venv..."
     rm -rf venv/ && exec "$0"
 fi
 
-# 5. CONFIGURE & LAUNCH (UPDATED WITH AUTO-UPDATE BLOCKER)
-# --skip-prepare-environment prevents the WebUI from overwriting our pip versions
+# 5. CONFIGURE & LAUNCH
 export COMMANDLINE_ARGS="--api --precision full --no-half --use-cpu all --skip-torch-cuda-test --lowvram --disable-nan-check --skip-prepare-environment"
 export STABLE_DIFFUSION_REPO="https://github.com/w-e-w/stablediffusion.git"
 export PYTHONUNBUFFERED=1
 
-echo "Starting Engine (Hard Locked Versions)..."
+echo "[*] Initializing Log File..."
 > "$LOG_FILE"
+
+# --- SPAWN LOG WINDOW (D-BUS & CLEAN ROOM FIX) ---
+if command -v gnome-terminal &> /dev/null; then
+    # We pass the D-Bus session address so gnome-terminal can connect to the Factory
+    env -i HOME="$HOME" \
+           DISPLAY="$DISPLAY" \
+           XAUTHORITY="$XAUTHORITY" \
+           DBUS_SESSION_BUS_ADDRESS="$DBUS_SESSION_BUS_ADDRESS" \
+    gnome-terminal --title="SD_ENGINE_LOGS" -- bash -c "tail -f $LOG_FILE" &
+    LOG_TERM_PID=$!
+fi
+
+echo "Starting Engine (Ctrl+C to stop all)..."
 stdbuf -oL -eL ./venv/bin/python3 -u launch.py > "$LOG_FILE" 2>&1 &
 ENGINE_PID=$!
 
@@ -87,13 +101,9 @@ while true; do
         break
     fi
     
-    # If the middleware error appears, we must kill it and force-revert again
     if tail -n 10 "$LOG_FILE" | grep -qEi "RuntimeError: Cannot add middleware"; then
-        echo -e "\n[!] API Middleware Crash Detected. Force-patching venv and restarting..."
-        ./venv/bin/pip install anyio==3.7.1 fastapi==0.90.1 starlette==0.23.1 --force-reinstall
-        kill $ENGINE_PID 2>/dev/null
-        sleep 2
-        exec "$0"
+        echo -e "\n[!] Middleware Crash. Restarting..."
+        cleanup
     fi
 
     STATUS=$(tail -c 1000 "$LOG_FILE" | tr '\r' '\n' | tail -n 1 | cut -c 1-80)
