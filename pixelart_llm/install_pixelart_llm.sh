@@ -48,7 +48,7 @@ if [ ! -d "venv" ]; then
     ./venv/bin/pip install --upgrade pip
 fi
 
-# CRITICAL: We force these versions EVERY launch to prevent "RuntimeError"
+# CRITICAL LOCK: These specific versions must exist for the API to function
 echo "[*] Enforcing API Compatibility Layers..."
 ./venv/bin/pip install torch==2.1.2+cu118 torchvision==0.16.2+cu118 --extra-index-url https://download.pytorch.org/whl/cu118
 ./venv/bin/pip install anyio==3.7.1 httpcore==0.15.0 fastapi==0.90.1 starlette==0.23.1 --force-reinstall
@@ -69,12 +69,13 @@ if [[ "$AUDIT_RESULT" != "PASS" ]]; then
     rm -rf venv/ && exec "$0"
 fi
 
-# 5. CONFIGURE & LAUNCH
-export COMMANDLINE_ARGS="--api --precision full --no-half --use-cpu all --skip-torch-cuda-test --lowvram --disable-nan-check"
+# 5. CONFIGURE & LAUNCH (UPDATED WITH AUTO-UPDATE BLOCKER)
+# --skip-prepare-environment prevents the WebUI from overwriting our pip versions
+export COMMANDLINE_ARGS="--api --precision full --no-half --use-cpu all --skip-torch-cuda-test --lowvram --disable-nan-check --skip-prepare-environment"
 export STABLE_DIFFUSION_REPO="https://github.com/w-e-w/stablediffusion.git"
 export PYTHONUNBUFFERED=1
 
-echo "Starting Engine (Ctrl+C to stop everything)..."
+echo "Starting Engine (Hard Locked Versions)..."
 > "$LOG_FILE"
 stdbuf -oL -eL ./venv/bin/python3 -u launch.py > "$LOG_FILE" 2>&1 &
 ENGINE_PID=$!
@@ -86,16 +87,15 @@ while true; do
         break
     fi
     
-    # Check for startup crashes
-    if tail -n 10 "$LOG_FILE" | grep -qEi "RuntimeError: Cannot add middleware|anyio.WouldBlock"; then
-        echo -e "\n[!] API Middleware Crash Detected. Restarting..."
-        kill $ENGINE_PID 2>/dev/null
-        # Force reinstall again before looping
+    # If the middleware error appears, we must kill it and force-revert again
+    if tail -n 10 "$LOG_FILE" | grep -qEi "RuntimeError: Cannot add middleware"; then
+        echo -e "\n[!] API Middleware Crash Detected. Force-patching venv and restarting..."
         ./venv/bin/pip install anyio==3.7.1 fastapi==0.90.1 starlette==0.23.1 --force-reinstall
+        kill $ENGINE_PID 2>/dev/null
+        sleep 2
         exec "$0"
     fi
 
-    # Progress bar capture
     STATUS=$(tail -c 1000 "$LOG_FILE" | tr '\r' '\n' | tail -n 1 | cut -c 1-80)
     printf "\r\033[K[$(date +%H:%M:%S)] %s" "$STATUS"
     sleep 2
