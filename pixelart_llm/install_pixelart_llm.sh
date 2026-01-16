@@ -94,7 +94,7 @@ while true; do
 
     # Progress bar capture
     STATUS=$(tail -c 1000 "$LOG_FILE" | tr '\r' '\n' | tail -n 1 | cut -c 1-80)
-    printf "\r\033[K[$(date +%H:%M:%S)] $STATUS"
+    printf "\r\033[K[$(date +%H:%M:%S)] %s" "$STATUS"
     sleep 2
 done
 
