@@ -9,22 +9,23 @@ import signal
 import subprocess
 from PIL import Image
 from io import BytesIO
+# Import the controller to handle pixel perfection
+import pixel_engine_controller as engine
 
 # --- CONFIGURATION ---
 BASE_URL = "http://127.0.0.1:7860"
 API_URL = f"{BASE_URL}/sdapi/v1/txt2img"
 PROG_URL = f"{BASE_URL}/sdapi/v1/progress"
 PROMPTS_FILE = "prompts.txt"
-OUTPUT_DIR = "outputs/pixelart"
+OUTPUT_DIR = os.path.expanduser("~/.local/share/pixelart_engine/outputs")
 
-# Resolution Mapping by Category
+# Preference: Default to True
+PROCESS_ASSETS = True
+
+# Resolution Mapping
 SIZES = {
-    "GEM": 256,      # Small sharp icons
-    "ITEM": 384,     # Mid-size objects
-    "SLOT": 512,     # Standard machine icons
-    "WORLD": 768,    # Level environments
-    "MAP": 1024,     # High-res maps (High VRAM only)
-    "DEFAULT": 512
+    "GEM": 256, "ITEM": 384, "SLOT": 512, 
+    "WORLD": 768, "MAP": 1024, "DEFAULT": 512
 }
 
 os.makedirs(OUTPUT_DIR, exist_ok=True)
@@ -40,7 +41,6 @@ def signal_handler(sig, frame):
 signal.signal(signal.SIGINT, signal_handler)
 
 def get_vram_total():
-    """Detects GPU VRAM to determine if we need to cap resolution."""
     try:
         res = subprocess.check_output(["nvidia-smi", "--query-gpu=memory.total", "--format=csv,noheader,nounits"])
         return int(res.decode().strip())
@@ -48,11 +48,9 @@ def get_vram_total():
         return 0
 
 def slugify(text):
-    """Clean prompt for filename usage."""
     return re.sub(r'[^\w\s-]', '', text).strip().lower().replace(' ', '_')[:50]
 
 def is_valid_image(filepath):
-    """Verify image exists and is valid PNG."""
     if not os.path.exists(filepath) or os.path.getsize(filepath) == 0:
         return False
     try:
@@ -63,7 +61,6 @@ def is_valid_image(filepath):
         return False
 
 def track_progress(stop_event):
-    """Background progress bar updates."""
     while not stop_event.is_set() and keep_running:
         try:
             res = requests.get(PROG_URL, timeout=1)
@@ -81,7 +78,7 @@ def track_progress(stop_event):
 def generate_images():
     global keep_running, total_time, images_completed
     vram = get_vram_total()
-    is_kepler = vram < 4000 # Identify GTX 780
+    is_kepler = vram < 4000 
     
     if not os.path.exists(PROMPTS_FILE):
         print(f"[!] Error: {PROMPTS_FILE} not found.")
@@ -91,12 +88,11 @@ def generate_images():
         prompts = [line.strip() for line in f if line.strip()]
 
     print(f"[*] Starting Batch: {len(prompts)} items.")
-    print(f"[*] GPU Stats: {vram}MB VRAM | Mode: {'Kepler Safety (Cap 512)' if is_kepler else 'High-Res Multi-Size'}")
+    print(f"[*] GPU Stats: {vram}MB VRAM | Kepler Safety: {is_kepler}")
 
     for i, raw_line in enumerate(prompts):
         if not keep_running: break
 
-        # Category extraction
         category = "DEFAULT"
         if ": " in raw_line:
             category_part, prompt_text = raw_line.split(": ", 1)
@@ -105,10 +101,9 @@ def generate_images():
         else:
             prompt_text = raw_line
 
-        # Resolution Selection
         target_size = SIZES.get(category, SIZES["DEFAULT"])
         if is_kepler and target_size > 512:
-            target_size = 512 # Force safety on GTX 780
+            target_size = 512
 
         filename = f"{slugify(prompt_text)}.png"
         filepath = os.path.join(OUTPUT_DIR, filename)
@@ -121,11 +116,8 @@ def generate_images():
         payload = {
             "prompt": f"pixel art, {prompt_text}, vibrant colors, 16-bit aesthetic",
             "negative_prompt": "blurry, low quality, photo, realistic, 3d render",
-            "steps": 20, 
-            "width": target_size, 
-            "height": target_size, 
-            "cfg_scale": 7, 
-            "sampler_name": "Euler a"
+            "steps": 20, "width": target_size, "height": target_size, 
+            "cfg_scale": 7, "sampler_name": "Euler a"
         }
 
         start_time = time.time()
@@ -145,12 +137,17 @@ def generate_images():
                 
                 img_data = base64.b64decode(response.json()['images'][0])
                 with Image.open(BytesIO(img_data)) as img:
+                    # --- PIXEL PERFECT PROCESSING ---
+                    if PROCESS_ASSETS:
+                        # Pass the specific category to adjust internal pixel chunkiness
+                        img = engine.apply_pixel_perfection(img, category=category)
+                    
                     img.save(filepath)
                 
                 avg_time = total_time / images_completed
                 print(f"\r    [DONE] {target_size}px | Time: {duration:.2f}s | Avg: {avg_time:.2f}s | Saved: {filename}")
             
-            if is_kepler: time.sleep(8) # Cool down
+            if is_kepler: time.sleep(8) 
             
         except Exception as e:
             stop_event.set()
@@ -160,12 +157,21 @@ def generate_images():
     print(f"\n[*] Session Finished. Total Images: {images_completed} | Avg Speed: {total_time/max(1, images_completed):.2f}s")
 
 if __name__ == "__main__":
+    wait_count = 0
     try:
         while keep_running:
             try:
-                if requests.get(f"{BASE_URL}/sdapi/v1/options", timeout=2).status_code == 200: break
-            except:
+                status = requests.get(f"{BASE_URL}/sdapi/v1/options", timeout=2)
+                if status.status_code == 200:
+                    print("\n[✓] Backend API detected and responsive.")
+                    break
+            except (requests.exceptions.ConnectionError, requests.exceptions.Timeout):
+                wait_count += 2
+                sys.stdout.write(f"\r[*] Waiting for Stable Diffusion API (Options Request)... {wait_count}s")
+                sys.stdout.flush()
                 time.sleep(2)
-        if keep_running: generate_images()
-    except KeyboardInterrupt: pass
-    
+        
+        if keep_running:
+            generate_images()
+    except KeyboardInterrupt:
+        pass
