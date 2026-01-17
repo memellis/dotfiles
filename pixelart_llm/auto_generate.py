@@ -7,6 +7,7 @@ import re
 import base64
 import signal
 import subprocess
+import hashlib
 from PIL import Image
 from io import BytesIO
 import pixel_engine_controller as engine
@@ -18,7 +19,8 @@ PROG_URL = f"{BASE_URL}/sdapi/v1/progress"
 PROMPTS_FILE = "prompts.txt"
 OUTPUT_DIR = os.path.expanduser("~/.local/share/pixelart_engine/outputs")
 
-PROCESS_ASSETS = True
+# Instructions: Default to True
+PROCESS_ASSETS = True 
 
 SIZES = {
     "GEM": 256, "ITEM": 384, "SLOT": 512, 
@@ -30,6 +32,7 @@ keep_running = True
 total_generation_time = 0.0
 images_completed = 0
 total_prompts = 0
+skipped_count = 0
 
 def signal_handler(sig, frame):
     global keep_running
@@ -52,12 +55,13 @@ def get_vram_total():
         return int(res.decode().strip())
     except: return 0
 
-def slugify(text):
-    return re.sub(r'[^\w\s-]', '', text).strip().lower().replace(' ', '_')[:50]
+def get_prompt_hash(text):
+    """Creates a unique 32-character MD5 hash for any prompt string."""
+    return hashlib.md5(text.strip().encode('utf-8')).hexdigest()
 
-def track_progress(stop_event, current_start_time):
-    """Displays progress bar and ETA on a single line."""
-    global images_completed, total_prompts, total_generation_time
+def track_progress(stop_event, current_start_time, remaining_work_count):
+    """Displays progress bar and ETA based ONLY on work remaining in this session."""
+    global images_completed, total_generation_time, skipped_count
     
     while not stop_event.is_set() and keep_running:
         try:
@@ -66,32 +70,33 @@ def track_progress(stop_event, current_start_time):
                 data = res.json()
                 progress = data.get("progress", 0)
                 if progress > 0:
-                    # 1. Calculate ETA for the CURRENT image
+                    # 1. Math for the single item currently being processed
                     elapsed = time.time() - current_start_time
-                    estimated_total_for_this_one = elapsed / progress
-                    remaining_this_one = estimated_total_for_this_one - elapsed
+                    est_single = elapsed / progress
+                    rem_single = est_single - elapsed
                     
-                    # 2. Calculate ETA for the WHOLE BATCH
-                    remaining_items = total_prompts - images_completed - 1
-                    if images_completed > 0:
-                        avg_per_item = total_generation_time / images_completed
+                    # 2. Math for the remaining session queue
+                    done_this_session = images_completed - skipped_count
+                    left_in_session = remaining_work_count - done_this_session - 1
+                    
+                    if done_this_session > 0:
+                        avg_speed = total_generation_time / done_this_session
                     else:
-                        avg_per_item = estimated_total_for_this_one
+                        avg_speed = est_single
                     
-                    batch_eta = (avg_per_item * remaining_items) + remaining_this_one
+                    batch_eta = (avg_speed * left_in_session) + rem_single
                     
-                    # 3. Render the Line
                     percent = progress * 100
                     bar = "█" * int(20 * progress) + "-" * (20 - int(20 * progress))
                     eta_str = format_eta(batch_eta)
                     
-                    sys.stdout.write(f"\r    [GPU] |{bar}| {percent:.1f}% | Batch ETA: {eta_str}  ")
+                    sys.stdout.write(f"\r    [GPU] |{bar}| {percent:.1f}% | Session ETA: {eta_str}  ")
                     sys.stdout.flush()
         except: pass
         time.sleep(1)
 
 def generate_images():
-    global keep_running, total_generation_time, images_completed, total_prompts
+    global keep_running, total_generation_time, images_completed, total_prompts, skipped_count
     vram = get_vram_total()
     is_kepler = vram < 4000 
     
@@ -99,43 +104,64 @@ def generate_images():
         print(f"[!] Error: {PROMPTS_FILE} not found."); return
 
     with open(PROMPTS_FILE, "r") as f:
-        prompts = [line.strip() for line in f if line.strip()]
+        all_lines = [line.strip() for line in f if line.strip()]
 
-    total_prompts = len(prompts)
-    print(f"[*] Starting Batch: {total_prompts} items.")
+    total_prompts = len(all_lines)
+    valid_prompts = []
     
-    for i, raw_line in enumerate(prompts):
+    print(f"[*] Auditing {total_prompts} prompts against local storage...")
+    
+    # SILENT AUDIT: Check for existing hashes
+    for raw_line in all_lines:
+        file_hash = get_prompt_hash(raw_line)
+        filepath = os.path.join(OUTPUT_DIR, f"{file_hash}.png")
+
+        if os.path.exists(filepath) and os.path.getsize(filepath) > 0:
+            skipped_count += 1
+        else:
+            valid_prompts.append(raw_line)
+
+    images_completed = skipped_count
+    remaining_work_count = len(valid_prompts)
+
+    print(f"[*] Audit Results: {skipped_count} found, {remaining_work_count} remaining.")
+
+    if remaining_work_count == 0:
+        print("[✓] All tasks already completed. Total images: 50/50.")
+        return
+
+    start_batch_time = time.time()
+    
+    for i, raw_line in enumerate(valid_prompts):
         if not keep_running: break
 
         category = "DEFAULT"
         if ": " in raw_line:
-            cat_part, prompt_text = raw_line.split(": ", 1)
-            if cat_part in SIZES: category = cat_part
-        else: prompt_text = raw_line
+            cat_part, p_text = raw_line.split(": ", 1)
+            if cat_part.upper() in SIZES: category = cat_part.upper()
+        else: p_text = raw_line
 
-        filename = f"{slugify(prompt_text)}.png"
+        file_hash = get_prompt_hash(raw_line)
+        filename = f"{file_hash}.png"
         filepath = os.path.join(OUTPUT_DIR, filename)
 
-        if os.path.exists(filepath) and os.path.getsize(filepath) > 0:
-            images_completed += 1
-            continue
-
-        print(f"\n[*] [{i+1}/{total_prompts}] {category}: {prompt_text}")
+        # Global index display (Current iteration + what we skipped)
+        current_display_idx = i + skipped_count + 1
+        print(f"\n[*] [{current_display_idx}/{total_prompts}] {category}: {p_text[:60]}...")
         
         target_size = SIZES.get(category, 512)
         if is_kepler and target_size > 512: target_size = 512
 
         payload = {
-            "prompt": f"pixel art, {prompt_text}, vibrant colors, 16-bit aesthetic",
-            "negative_prompt": "blurry, low quality, photo, realistic",
+            "prompt": f"pixel art, {p_text}, vibrant colors, 16-bit aesthetic",
+            "negative_prompt": "blurry, low quality, photo, realistic, shadows, gradients",
             "steps": 20, "width": target_size, "height": target_size, 
             "cfg_scale": 7, "sampler_name": "Euler a"
         }
 
         start_time = time.time()
         stop_event = threading.Event()
-        # Passing start_time to the tracker for live math
-        threading.Thread(target=track_progress, args=(stop_event, start_time)).start()
+        threading.Thread(target=track_progress, args=(stop_event, start_time, remaining_work_count)).start()
 
         try:
             response = requests.post(API_URL, json=payload, timeout=1200)
@@ -152,22 +178,31 @@ def generate_images():
                         img = engine.apply_pixel_perfection(img, category=category)
                     img.save(filepath)
                 
-                print(f"\n    [DONE] {duration:.1f}s | Saved: {filename}")
+                print(f"\n    [DONE] {duration:.1f}s | Hash: {file_hash}")
             
-            if is_kepler: time.sleep(5) 
+            if is_kepler: time.sleep(2) 
             
         except Exception as e:
             stop_event.set()
             print(f"\n    [!] Error: {e}")
             time.sleep(5)
 
+    if keep_running:
+        total_session_duration = time.time() - start_batch_time
+        print("\n" + "="*40)
+        print(f" BATCH COMPLETE")
+        print(f" Session Time: {format_eta(total_session_duration)}")
+        print(f" New Files:    {remaining_work_count}")
+        print(f" Total Files:  {images_completed}")
+        print("="*40 + "\n")
+
 if __name__ == "__main__":
+    # Wait for SD to be alive
     while keep_running:
         try:
-            status = requests.get(f"{BASE_URL}/sdapi/v1/options", timeout=2)
-            if status.status_code == 200: break
-        except:
-            time.sleep(2)
+            if requests.get(f"{BASE_URL}/sdapi/v1/options", timeout=2).status_code == 200: break
+        except: time.sleep(2)
     
     if keep_running:
         generate_images()
+    
