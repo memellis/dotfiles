@@ -1,6 +1,6 @@
 #!/bin/bash
 # install_pixelart_llm.sh - Kepler GPU (GTX 780) & Ubuntu 24.04 STABLE
-# Strategy: Legacy Torch 1.13.1 + FP32 Force + Reliable Window Cleanup
+# Strategy: Legacy Torch 1.13.1 + FP32 Force + Auto-Shutdown on Completion
 
 TARGET_BASE="$HOME/.local/share/pixelart_engine"
 WEBUI_DIR="$TARGET_BASE/stable-diffusion-webui"
@@ -12,12 +12,17 @@ LOG_TITLE="SD_ENGINE_LOGS"
 echo "[*] Cleaning up old sessions..."
 fuser -k 7860/tcp 2>/dev/null
 pkill -f "launch.py" 2>/dev/null
-pkill -f "$LOG_TITLE" 2>/dev/null # Clear any orphaned log windows
+pkill -f "$LOG_TITLE" 2>/dev/null 
 
 echo "--- PixelArt LLM Engine Setup (GTX 780 GPU Edition) ---"
 
 cleanup() {
-    echo -e "\n\n[!] Interrupt detected. Cleaning up..."
+    # If $1 is SIGINT, it was a manual cancel. Otherwise, it's a clean exit.
+    if [ "$1" == "SIGINT" ]; then
+        echo -e "\n\n[!] Interrupt detected. Cleaning up..."
+    else
+        echo -e "\n\n[✓] Processing finished. Shutting down engines..."
+    fi
     
     # 1. Kill the Stable Diffusion Engine
     if [ ! -z "$ENGINE_PID" ]; then kill $ENGINE_PID 2>/dev/null; fi
@@ -27,11 +32,13 @@ cleanup() {
     
     # 3. Final port cleanup
     fuser -k 7860/tcp 2>/dev/null
+    
     echo "[*] Cleanup complete. Desktop cleared."
     exit 0
 }
 
-trap cleanup SIGINT SIGTERM
+# Trap signals for manual interrupts
+trap 'cleanup SIGINT' SIGINT SIGTERM
 
 # 1. SYSTEM SETUP
 if ! command -v python3.10 &> /dev/null; then
@@ -56,7 +63,6 @@ if [ ! -d "venv" ]; then
     ./venv/bin/pip install --upgrade pip
 fi
 
-# We use Torch 1.13.1 because 2.x+ lacks the Sm35 kernels for GTX 780
 echo "[*] Enforcing Kepler-Compatible Torch 1.13.1 + CUDA 11.7..."
 ./venv/bin/pip install torch==1.13.1+cu117 torchvision==0.14.1+cu117 --extra-index-url https://download.pytorch.org/whl/cu117
 ./venv/bin/pip install anyio==3.7.1 httpcore==0.15.0 fastapi==0.90.1 starlette==0.23.1 --force-reinstall
@@ -76,7 +82,6 @@ AUDIT_RESULT=$(./venv/bin/python3 <<EOF
 import torch, sys
 if not torch.cuda.is_available(): sys.exit(1)
 try:
-    # Physical execution test to verify kernel presence
     x = torch.ones(1).cuda()
     print(f"PASS: {torch.cuda.get_device_name(0)}")
 except: sys.exit(1)
@@ -90,8 +95,7 @@ else
     echo "[✓] GPU Confirmed: $AUDIT_RESULT"
 fi
 
-# 5. CONFIGURE & LAUNCH (Enforced GPU Mode)
-# --precision full & --no-half: Kepler cannot do FP16 math
+# 5. CONFIGURE & LAUNCH
 export COMMANDLINE_ARGS="--api --precision full --no-half --opt-split-attention --lowvram --skip-prepare-environment --disable-safe-unpickle"
 export STABLE_DIFFUSION_REPO="https://github.com/w-e-w/stablediffusion.git"
 export PYTHONUNBUFFERED=1
@@ -99,9 +103,8 @@ export PYTHONUNBUFFERED=1
 echo "[*] Initializing Log File..."
 > "$LOG_FILE"
 
-# --- SPAWN LOG WINDOW (RELIABLE CLEANUP VERSION) ---
+# --- SPAWN LOG WINDOW ---
 if command -v gnome-terminal &> /dev/null; then
-    # 'exec -a' renames the process in the process list, making pkill reliable
     env -i HOME="$HOME" DISPLAY="$DISPLAY" XAUTHORITY="$XAUTHORITY" DBUS_SESSION_BUS_ADDRESS="$DBUS_SESSION_BUS_ADDRESS" \
     gnome-terminal --title="$LOG_TITLE" -- bash -c "exec -a $LOG_TITLE tail -f $LOG_FILE" &
 fi
@@ -119,7 +122,7 @@ while true; do
     
     if tail -n 10 "$LOG_FILE" | grep -qEi "RuntimeError: Cannot add middleware"; then
         echo -e "\n[!] API Middleware Crash. Restarting..."
-        cleanup
+        cleanup SIGINT # Force restart cleanup
     fi
 
     STATUS=$(tail -c 1000 "$LOG_FILE" | tr '\r' '\n' | tail -n 1 | cut -c 1-80)
@@ -129,3 +132,6 @@ done
 
 # 7. HANDOVER
 ./venv/bin/python3 auto_generate.py
+
+# 8. AUTOMATIC COMPLETION CLEANUP
+cleanup SUCCESS
