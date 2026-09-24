@@ -7,13 +7,14 @@
     1. Downloads the latest Stage3 OpenRC tarball from official Gentoo mirrors (if missing).
     2. Imports the rootfs into WSL2 (`C:\WSL\Gentoo`).
     3. Idempotently provisions Portage settings (`make.conf`), system locales, and core packages.
-    4. Creates the target user account, configures passwordless sudo, and pre-creates `/nix`.
-    5. Sets up a clean Python virtual environment (~/.venv/powerline) for Powerline.
-    6. Imports Windows SSH keys and scans GitHub host keys cleanly.
-    7. Prompts interactively for your SSH key passphrase to clone or update your dotfiles.
-    8. Executes dotfile installation scripts (`install_dotfiles.sh all` / `install.sh`) inside
-       the activated venv while intercepting pip calls to strip '--user' arguments dynamically.
-    9. Configures `/etc/wsl.conf` and defaults login to the target user.
+    4. Syncs the Portage tree and performs a full world update (@world).
+    5. Creates the target user account, configures passwordless sudo, and pre-creates `/nix`.
+    6. Sets up a clean Python virtual environment (~/.venv/powerline) for Powerline.
+    7. Imports Windows SSH keys and scans GitHub host keys cleanly.
+    8. Prompts interactively for your SSH key passphrase to clone or update your dotfiles.
+    9. Idempotently manages existing Oh My Bash directories and executes `install_dotfiles.sh all` / `install.sh`
+       inside the activated venv while intercepting pip calls to strip '--user' arguments dynamically.
+   10. Configures `/etc/wsl.conf` and defaults login to the target user.
 
 .NOTES
     Author: Markus Ellis
@@ -93,7 +94,7 @@ DOTFILES_URL="__DOTFILES_REPO__"
 WIN_SSH_DIR="__WIN_SSH_DIR_WSL__"
 CPU_CORES=$(nproc)
 
-echo "=== 1/8. Configuring Portage (/etc/portage/make.conf) ==="
+echo "=== 1/9. Configuring Portage (/etc/portage/make.conf) ==="
 cat <<EOF > /etc/portage/make.conf
 COMMON_FLAGS="-O2 -pipe -march=native"
 CFLAGS="${COMMON_FLAGS}"
@@ -106,13 +107,15 @@ FEATURES="binpkg-logs parallel-fetch"
 LC_MESSAGES=C.utf8
 EOF
 
-echo "=== 2/8. Syncing Portage Tree ==="
+echo "=== 2/9. Syncing Portage Tree & Updating World Set ==="
 mkdir -p /var/db/repos/gentoo
 if [ ! -f /var/db/repos/gentoo/profiles/repo_name ]; then
     emerge-webrsync
 fi
 
-echo "=== 3/8. Configuring Locales ==="
+emerge --quiet --update --deep --changed-use @world
+
+echo "=== 3/9. Configuring Locales ==="
 cat <<EOF > /etc/locale.gen
 en_US.UTF-8 UTF-8
 en_GB.UTF-8 UTF-8
@@ -126,10 +129,10 @@ elif eselect locale list | grep -q "en_GB.utf8"; then
 fi
 env-update && source /etc/profile
 
-echo "=== 4/8. Installing Core Packages (Sudo, Git, OpenSSH, Python) ==="
+echo "=== 4/9. Installing Core Packages (Sudo, Git, OpenSSH, Python) ==="
 emerge --quiet --noreplace app-admin/sudo app-eselect/eselect-repository dev-vcs/git net-misc/openssh dev-lang/python
 
-echo "=== 5/8. Managing Target User & System Directories ==="
+echo "=== 5/9. Managing Target User & System Directories ==="
 if ! id "${USERNAME}" &>/dev/null; then
     useradd -m -G wheel,portage,users -s /bin/bash "${USERNAME}"
 fi
@@ -147,7 +150,7 @@ fi
 
 USER_HOME="/home/${USERNAME}"
 
-echo "=== 6/8. Provisioning Powerline Python Virtual Environment ==="
+echo "=== 6/9. Provisioning Powerline Python Virtual Environment ==="
 VENV_DIR="${USER_HOME}/.venv/powerline"
 BIN_DIR="${USER_HOME}/.local/bin"
 
@@ -160,7 +163,7 @@ su - "${USERNAME}" -c "
     ln -sf '${VENV_DIR}/bin/powerline' '${BIN_DIR}/powerline'
 "
 
-echo "=== 7/8. Importing Windows SSH Keys ==="
+echo "=== 7/9. Importing Windows SSH Keys ==="
 if [ -d "${WIN_SSH_DIR}" ]; then
     mkdir -p "${USER_HOME}/.ssh"
     cp -r "${WIN_SSH_DIR}"/* "${USER_HOME}/.ssh/" 2>/dev/null || true
@@ -177,7 +180,7 @@ if [ -d "${WIN_SSH_DIR}" ]; then
     echo "SSH keys successfully imported to ${USER_HOME}/.ssh"
 fi
 
-echo "=== 8/8. Managing Dotfiles Repository ==="
+echo "=== 8/9. Managing Dotfiles Repository ==="
 DOTFILES_DIR="${USER_HOME}/dotfiles"
 
 if [ -n "${DOTFILES_URL}" ]; then
@@ -219,6 +222,12 @@ if [ -n "${DOTFILES_URL}" ]; then
         }
         export -f pip
 
+        # Clean up existing Oh My Bash installations prior to re-execution to ensure installer idempotency
+        if [ -d '${USER_HOME}/.oh-my-bash' ]; then
+            echo 'Removing existing ~/.oh-my-bash for clean re-installation...'
+            rm -rf '${USER_HOME}/.oh-my-bash'
+        fi
+
         if [ -f '${DOTFILES_DIR}/install_dotfiles.sh' ]; then
             echo 'Executing install_dotfiles.sh all...'
             bash '${DOTFILES_DIR}/install_dotfiles.sh' all
@@ -233,6 +242,7 @@ if [ -n "${DOTFILES_URL}" ]; then
     "
 fi
 
+echo "=== 9/9. Configuring /etc/wsl.conf ==="
 cat <<EOF > /etc/wsl.conf
 [user]
 default=${USERNAME}
